@@ -139,5 +139,14 @@ class Settings:
             bookmaker_key.endswith(suffix) for suffix in self.ontario_auto_match_suffixes
         )
 
+    def display_name(self, bookmaker_key: str) -> str:
+        """Human-readable book name for Telegram alerts, falling back to the raw API key
+        if it's somehow not in our (deliberately closed) allowlist yet."""
+        for group in ("sharp", "ontario"):
+            name = self._bookmakers[group].get("display_names", {}).get(bookmaker_key)
+            if name:
+                return name
+        return bookmaker_key
+
 
 settings = Settings()

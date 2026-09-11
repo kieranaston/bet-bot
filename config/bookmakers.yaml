@@ -8,6 +8,8 @@ sharp:
   # Pinnacle is the reference "true odds" book. Region: eu.
   known_keys:
     - pinnacle
+  display_names:
+    pinnacle: Pinnacle
 
 ontario:
   # Region: ca. Confirmed exact list -- do not add books here without explicit sign-off.
@@ -21,3 +23,11 @@ ontario:
   # Left empty on purpose: no automatic suffix matching. Everything must be in known_keys
   # above.
   auto_match_suffixes: []
+  # Human-readable names shown in Telegram alerts, instead of the raw API key.
+  display_names:
+    bet99_ca_on: Bet99
+    betano_ca_on: Betano
+    betmgm_ca_on: BetMGM
+    betrivers_ca_on: BetRivers
+    proline_ca_on: PROLINE+
+    sportsinteraction_ca_on: Sports Interaction

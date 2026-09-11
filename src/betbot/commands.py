@@ -62,13 +62,13 @@ def _dispatch(db: Database, settings: Settings, text: str) -> str:
         if cmd == "/bankroll":
             return _cmd_bankroll(db, settings, args)
         if cmd == "/placed":
-            return _cmd_placed(db, args)
+            return _cmd_placed(db, settings, args)
         if cmd == "/skip":
             return _cmd_skip(db, args)
         if cmd == "/settle":
             return _cmd_settle(db, settings, args)
         if cmd == "/status":
-            return _cmd_status(db)
+            return _cmd_status(db, settings)
     except Exception as exc:  # noqa: BLE001 -- surface the error to the user, don't crash the run
         logger.exception("Error handling command %r", text)
         return f"Error handling `{text}`: {exc}"
@@ -89,7 +89,7 @@ def _get_alert(db, session, alert_id: int) -> Alert | None:
     return session.get(Alert, alert_id)
 
 
-def _cmd_placed(db: Database, args: list[str]) -> str:
+def _cmd_placed(db: Database, settings: Settings, args: list[str]) -> str:
     if not args:
         return "Usage: /placed <alert_id> [stake]"
     alert_id = int(args[0])
@@ -102,7 +102,7 @@ def _cmd_placed(db: Database, args: list[str]) -> str:
         alert.placed_stake = stake
         return (
             f"Logged bet #{alert_id}: {alert.outcome_name} @ {alert.book_odds} "
-            f"({alert.bookmaker_key}) for ${stake:,.2f}"
+            f"({settings.display_name(alert.bookmaker_key)}) for ${stake:,.2f}"
         )
 
 
@@ -154,7 +154,7 @@ def _cmd_settle(db: Database, settings: Settings, args: list[str]) -> str:
         )
 
 
-def _cmd_status(db: Database) -> str:
+def _cmd_status(db: Database, settings: Settings) -> str:
     with db.session() as s:
         open_bets = (
             s.query(Alert).filter(Alert.status == "placed").order_by(Alert.commence_time)
@@ -165,6 +165,7 @@ def _cmd_status(db: Database) -> str:
         for a in open_bets:
             lines.append(
                 f"#{a.id} {a.away_team} @ {a.home_team} — {a.outcome_name} "
-                f"@ {a.book_odds} ({a.bookmaker_key}) ${a.placed_stake:,.2f}"
+                f"@ {a.book_odds} ({settings.display_name(a.bookmaker_key)}) "
+                f"${a.placed_stake:,.2f}"
             )
         return "\n".join(lines)
