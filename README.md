@@ -67,17 +67,19 @@ Once these are set, `.github/workflows/scan.yml` will start running automaticall
 15 minutes (also triggerable manually from the Actions tab via "Run workflow").
 
 ### 5. Verify your Ontario bookmaker keys
-`config/bookmakers.yaml` ships with best-known bookmaker keys, but The Odds API adds/renames
-books over time. After step 1-2 above, run locally (see below) to check:
+`config/bookmakers.yaml` is a deliberately closed allowlist — currently `bet99_ca_on`,
+`betano_ca_on`, `betmgm_ca_on`, `betrivers_ca_on`, `proline_ca_on`, `sportsinteraction_ca_on`.
+No suffix auto-matching: a book not in that list is never checked, even if The Odds API
+returns it under the `ca` region. If you want to add or remove a book, run locally (see
+below) to confirm the exact live key first:
 
 ```bash
 python scripts/list_bookmakers.py americanfootball_nfl
 ```
 
-This prints every bookmaker key currently returned and flags which ones your config
-auto-matches as Ontario books. Update `config/bookmakers.yaml` if anything's missing or
-wrong — `ontario.auto_match_suffixes` (`_ca_on`, `_on`) catches most new additions
-automatically, but it's worth a sanity check.
+This prints every bookmaker key The Odds API currently returns for that sport/region —
+use it to confirm a key before adding it to `config/bookmakers.yaml`, since keys
+occasionally change.
 
 ### 6. Set your real starting bankroll
 Edit `bankroll.starting_amount` in `config/settings.yaml` before the first run (it only

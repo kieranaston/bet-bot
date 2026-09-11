@@ -1,14 +1,8 @@
 # Bookmaker key configuration for The Odds API (https://the-odds-api.com/).
 #
-# IMPORTANT: The Odds API's exact bookmaker keys change as they add/rename books, and we
-# don't have a live API key to verify these against right now. Once you have a key, run:
-#
-#   python scripts/list_bookmakers.py americanfootball_nfl
-#
-# ...and paste the printed keys into `ontario.known_keys` below to correct/extend this list.
-# In the meantime, `ontario.auto_match_suffixes` acts as a safety net: any bookmaker key
-# returned by the API that ends in one of those suffixes is treated as an Ontario book even
-# if it's missing from `known_keys`.
+# This is a deliberately closed allowlist, confirmed by the user -- only these exact books
+# are checked. No suffix-based auto-matching: if a book isn't listed here, it's ignored,
+# even if The Odds API returns it under the `ca` region.
 
 sharp:
   # Pinnacle is the reference "true odds" book. Region: eu.
@@ -16,23 +10,14 @@ sharp:
     - pinnacle
 
 ontario:
-  # Best-known keys as of setup time (verify with scripts/list_bookmakers.py).
+  # Region: ca. Confirmed exact list -- do not add books here without explicit sign-off.
   known_keys:
-    - bet365_ca_on
+    - bet99_ca_on
+    - betano_ca_on
     - betmgm_ca_on
     - betrivers_ca_on
-    - betano_ca_on
-    - bet99_ca_on
-    - pointsbetca
     - proline_ca_on
     - sportsinteraction_ca_on
-    - draftkings_ca_on
-    - fanduel_ca_on
-    - betvictor_ca_on
-    - coolbet_ca_on
-    - northstarbets_ca_on
-  # Any bookmaker key returned by the API matching one of these suffixes is auto-included
-  # as an Ontario book, even if not listed above.
-  auto_match_suffixes:
-    - "_ca_on"
-    - "_on"
+  # Left empty on purpose: no automatic suffix matching. Everything must be in known_keys
+  # above.
+  auto_match_suffixes: []
