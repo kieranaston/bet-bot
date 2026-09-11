@@ -99,6 +99,18 @@ class Settings:
         return str(self._raw["odds_api"]["base_url"])
 
     @property
+    def timezone(self) -> str:
+        return str(self._raw["scheduling"]["timezone"])
+
+    @property
+    def scan_times_local(self) -> list[str]:
+        return list(self._raw["scheduling"]["scan_times_local"])
+
+    @property
+    def scan_window_minutes(self) -> int:
+        return int(self._raw["scheduling"]["scan_window_minutes"])
+
+    @property
     def scheduling_tiers(self) -> list[dict[str, Any]]:
         return sorted(
             self._raw["scheduling"]["tiers"], key=lambda t: t["max_hours_to_commence"]

@@ -2,10 +2,12 @@ name: Scan for +EV bets
 
 on:
   schedule:
-    # Every 15 minutes. This is the base polling rate -- betbot.scheduler applies its own
-    # adaptive cooldown on top so you don't get re-alerted every 15 min for an unchanged line;
-    # see config/settings.yaml `scheduling.tiers`.
-    - cron: "*/15 * * * *"
+    # Ticks every 10 minutes, but this costs nothing by itself (GitHub Actions minutes are
+    # free/cheap for a personal repo, not Odds API credits). betbot.main only actually calls
+    # the Odds API when the real Eastern clock time (DST-aware) falls within a scan window
+    # -- see config/settings.yaml `scheduling.scan_times_local` (currently 11am/5pm/11pm ET).
+    # Telegram command handling (/placed, /skip, /settle, etc.) still runs every tick.
+    - cron: "*/10 * * * *"
   workflow_dispatch: {}
 
 concurrency:

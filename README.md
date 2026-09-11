@@ -7,10 +7,15 @@ tracks your bankroll and performance over time.
 
 ## How it works
 
-1. A GitHub Actions workflow (`.github/workflows/scan.yml`) runs every 15 minutes.
-2. It pulls upcoming NFL/NBA/NHL/MLB odds (moneyline, spread, totals) from
+1. A GitHub Actions workflow (`.github/workflows/scan.yml`) ticks every 10 minutes, but
+   only actually calls the Odds API 3x/day, at 11am/5pm/11pm Eastern (configurable via
+   `config/settings.yaml` `scheduling.scan_times_local` — checked in real, DST-aware
+   Eastern clock time via `betbot.scheduler.is_scan_time`, not a fixed UTC cron, so it
+   stays correct across daylight saving changes). Telegram command handling (`/placed`,
+   `/skip`, `/settle`, etc.) still runs every 10-minute tick since it's free.
+2. During a scan, it pulls upcoming NFL/NBA/NHL/MLB odds (moneyline, spread, totals) from
    [The Odds API](https://the-odds-api.com/), for Pinnacle (sharp reference, region `eu`)
-   and Ontario-licensed books (region `ca`).
+   and your six confirmed Ontario books (region `ca`, see `config/bookmakers.yaml`).
 3. For each market, it devigs Pinnacle's two-way price into a true win probability
    (`src/betbot/devig.py`), then checks every Ontario book's price against that true
    probability (`src/betbot/ev.py`). Anything at or above the EV threshold in
@@ -63,8 +68,11 @@ secret**. Add all four:
 - `TELEGRAM_CHAT_ID`
 - `DATABASE_URL`
 
-Once these are set, `.github/workflows/scan.yml` will start running automatically every
-15 minutes (also triggerable manually from the Actions tab via "Run workflow").
+Once these are set, `.github/workflows/scan.yml` will start ticking automatically every
+10 minutes, actually scanning 3x/day (see "How it works" above; also triggerable manually
+from the Actions tab via "Run workflow"). **Both scheduled workflows are currently
+disabled** (`gh workflow list --all` to check) — re-enable with
+`gh workflow enable scan.yml` and `gh workflow enable daily_report.yml` when ready.
 
 ### 5. Verify your Ontario bookmaker keys
 `config/bookmakers.yaml` is a deliberately closed allowlist — currently `bet99_ca_on`,
@@ -129,7 +137,7 @@ scripts/
   init_db.py               creates tables / seeds bankroll
   report.py                daily digest sender
 .github/workflows/
-  scan.yml                 runs the scan every 15 min
+  scan.yml                 ticks every 10 min, actually scans 3x/day (see scan_times_local)
   daily_report.yml         sends the daily digest
   tests.yml                runs pytest on push/PR
 ```

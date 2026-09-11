@@ -1,6 +1,9 @@
 import datetime as dt
 
-from betbot.scheduler import cooldown_minutes_for, should_alert
+from betbot.scheduler import cooldown_minutes_for, is_scan_time, should_alert
+
+SCAN_TIMES = ["11:00", "17:00", "23:00"]
+TZ = "America/Toronto"
 
 TIERS = [
     {"max_hours_to_commence": 1, "cooldown_minutes": 5},
@@ -38,3 +41,26 @@ def test_should_alert_true_after_cooldown_elapses():
     now = dt.datetime.now(dt.timezone.utc)
     last = now - dt.timedelta(minutes=61)
     assert should_alert(12, TIERS, last, now, price_changed=False) is True
+
+
+def test_is_scan_time_handles_edt():
+    # July 15 2026 is EDT (UTC-4). 11:00 ET = 15:00 UTC.
+    now = dt.datetime(2026, 7, 15, 15, 3, tzinfo=dt.timezone.utc)
+    assert is_scan_time(now, SCAN_TIMES, TZ, window_minutes=10) is True
+
+
+def test_is_scan_time_handles_est():
+    # January 15 2026 is EST (UTC-5). 11:00 ET = 16:00 UTC.
+    now = dt.datetime(2026, 1, 15, 16, 3, tzinfo=dt.timezone.utc)
+    assert is_scan_time(now, SCAN_TIMES, TZ, window_minutes=10) is True
+
+
+def test_is_scan_time_false_outside_window():
+    # EDT: 11:00 ET = 15:00 UTC. 15:15 UTC is past the 10-minute window.
+    now = dt.datetime(2026, 7, 15, 15, 15, tzinfo=dt.timezone.utc)
+    assert is_scan_time(now, SCAN_TIMES, TZ, window_minutes=10) is False
+
+
+def test_is_scan_time_false_wrong_hour():
+    now = dt.datetime(2026, 7, 15, 12, 0, tzinfo=dt.timezone.utc)
+    assert is_scan_time(now, SCAN_TIMES, TZ, window_minutes=10) is False

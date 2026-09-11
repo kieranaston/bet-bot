@@ -1,13 +1,31 @@
-"""Adaptive re-alert cooldown: decide whether a given alert is stale enough to re-send.
+"""Scan-time gating and adaptive re-alert cooldown.
 
-The GitHub Actions cron (see .github/workflows/scan.yml) controls how often the bot *checks*
-the odds. This module controls how often it will re-*notify* you about the same opportunity
-between checks -- tighter cooldowns for games about to start (where lines move fast and
-staying current matters more), looser cooldowns for games far out.
+The GitHub Actions cron in .github/workflows/scan.yml ticks every 10 minutes for free, but
+we only want to actually spend Odds API credits a few times a day. `is_scan_time` decides
+that using real Eastern clock time (DST-aware, via zoneinfo) so the schedule stays correct
+across the November/March clock changes without anyone having to edit a cron expression.
+
+`should_alert` is a separate concern: once we *do* scan, this controls how often we'll
+re-notify about the same still-open opportunity between scans -- tighter cooldowns for
+games about to start, looser for games far out.
 """
 from __future__ import annotations
 
 import datetime as dt
+from zoneinfo import ZoneInfo
+
+
+def is_scan_time(
+    now_utc: dt.datetime, scan_times_local: list[str], timezone: str, window_minutes: int
+) -> bool:
+    local = now_utc.astimezone(ZoneInfo(timezone))
+    for time_str in scan_times_local:
+        hour, minute = (int(part) for part in time_str.split(":"))
+        target = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        elapsed_minutes = (local - target).total_seconds() / 60.0
+        if 0 <= elapsed_minutes < window_minutes:
+            return True
+    return False
 
 
 def cooldown_minutes_for(hours_to_commence: float, tiers: list[dict]) -> float:

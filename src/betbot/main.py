@@ -16,7 +16,7 @@ from betbot.ev import ev_pct
 from betbot.devig import devig
 from betbot.kelly import stake_amount
 from betbot.odds_client import OddsApiClient, OddsApiError
-from betbot.scheduler import should_alert
+from betbot.scheduler import is_scan_time, should_alert
 from betbot.storage import Alert, Database
 from betbot.telegram import TelegramClient
 
@@ -224,6 +224,26 @@ def run() -> None:
     secrets = Secrets.from_env()
     db = Database(secrets.database_url)
     telegram = TelegramClient(secrets.telegram_bot_token, secrets.telegram_chat_id)
+
+    # 1. Apply any Telegram commands the user sent since the last run. This runs on every
+    # tick (cron fires every 10 min) regardless of scan windows -- it's free (no Odds API
+    # calls), and keeps /placed, /skip, /settle etc. responsive rather than waiting hours
+    # for the next real scan.
+    offset_raw = db.get_kv("telegram_update_offset")
+    offset = int(offset_raw) if offset_raw else None
+    updates = telegram.get_updates(offset)
+    for reply in commands.process_updates(db, settings, updates):
+        telegram.send_message(reply)
+
+    # 2. Only spend Odds API credits during the configured scan windows (see
+    # config/settings.yaml `scheduling.scan_times_local`).
+    now = dt.datetime.now(dt.timezone.utc)
+    if not is_scan_time(
+        now, settings.scan_times_local, settings.timezone, settings.scan_window_minutes
+    ):
+        logger.info("Outside scheduled scan window -- skipping odds fetch.")
+        return
+
     odds_client = OddsApiClient(
         api_key=secrets.odds_api_key,
         base_url=settings.odds_api_base_url,
@@ -231,15 +251,7 @@ def run() -> None:
         odds_format=settings.odds_format,
     )
 
-    # 1. Apply any Telegram commands the user sent since the last run.
-    offset_raw = db.get_kv("telegram_update_offset")
-    offset = int(offset_raw) if offset_raw else None
-    updates = telegram.get_updates(offset)
-    for reply in commands.process_updates(db, settings, updates):
-        telegram.send_message(reply)
-
-    # 2. Scan configured sports/markets for +EV lines.
-    now = dt.datetime.now(dt.timezone.utc)
+    # 3. Scan configured sports/markets for +EV lines.
     bankroll = db.current_bankroll(settings.starting_bankroll)
     total_alerts = 0
     for sport in settings.sports:
