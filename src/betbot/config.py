@@ -156,5 +156,10 @@ class Settings:
                 return name
         return bookmaker_key
 
+    def homepage_url(self, bookmaker_key: str) -> str | None:
+        """Last-resort deep-link fallback (per Odds API docs) when includeLinks didn't
+        return an outcome/market/bookmaker link for this book."""
+        return self._bookmakers["ontario"].get("homepage_urls", {}).get(bookmaker_key)
+
 
 settings = Settings()

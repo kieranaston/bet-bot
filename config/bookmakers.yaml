@@ -31,3 +31,14 @@ ontario:
     betrivers_ca_on: BetRivers
     proline_ca_on: PROLINE+
     sportsinteraction_ca_on: Sports Interaction
+  # Final fallback link when The Odds API's includeLinks doesn't return an outcome/market/
+  # bookmaker link for this book (per their docs: fall back to the bookmaker's homepage,
+  # since the API doesn't provide one). Best-effort guesses -- NOT verified against each
+  # book's actual current domain, please double check these before relying on them.
+  homepage_urls:
+    bet99_ca_on: "https://bet99.com/"
+    betano_ca_on: "https://www.betano.ca/"
+    betmgm_ca_on: "https://ontario.betmgm.ca/"
+    betrivers_ca_on: "https://on.betrivers.com/"
+    proline_ca_on: "https://www.proline.ca/"
+    sportsinteraction_ca_on: "https://www.sportsinteraction.com/"

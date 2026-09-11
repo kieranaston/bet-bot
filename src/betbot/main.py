@@ -98,6 +98,7 @@ def process_event(
             if not book_market:
                 continue
             for name, point, price, link in extract_outcomes(book_market, book_bm):
+                link = link or settings.homepage_url(book_bm["key"])
                 true_prob = sharp_lookup.get((name, point))
                 if true_prob is None:
                     continue  # line doesn't match the sharp book's current line -- skip
@@ -244,7 +245,7 @@ def _send_alert_message(telegram: TelegramClient, alert: Alert) -> None:
         f"Stake ${alert.recommended_stake:,.2f} · true {alert.true_prob * 100:.0f}%",
     ]
     if alert.deep_link:
-        lines.append(f"[Bet slip]({alert.deep_link})")
+        lines.append(f"[Bet now]({alert.deep_link})")
     lines.append(f"`/placed {alert.id}`  `/skip {alert.id}`")
     telegram.send_message("\n".join(lines))
 
