@@ -3,12 +3,15 @@
 Covers three endpoints:
   - /sports/{sport}/events  -- free (no quota cost), used to check whether a sport has
     anything upcoming before spending credits on /odds.
-  - /sports/{sport}/odds    -- the paid endpoint. Cost = markets x region-equivalents.
-    Using `bookmakers=` (our fixed 7-book allowlist) instead of `regions=` costs 1
-    region-equivalent (every group of <=10 named bookmakers = 1 region) instead of 2
-    (eu for Pinnacle + ca for Ontario books) -- half the cost for the same data.
-  - /sports/{sport}/scores  -- flat 2 credits/request (with daysFrom set), used for
-    automatic bet settlement instead of a secondary results API.
+  - /sports/{sport}/odds    -- the paid endpoint. Confirmed cost formula (Odds API docs):
+    cost = [markets] x [regions]. Real scans use `regions=` (see config/settings.yaml),
+    not `bookmakers=` -- the docs' quota-cost examples only ever show `regions=`, so a
+    bookmakers-based discount isn't confirmed. get_odds() still supports `bookmakers=`
+    for anyone who wants to test its actual cost empirically (check the
+    `x-requests-last` value this module logs on every call).
+  - /sports/{sport}/scores  -- confirmed: 1 credit/request normally, 2 credits if
+    `daysFrom` is set (needed to see completed games) -- used for automatic bet
+    settlement instead of a secondary results API.
 """
 from __future__ import annotations
 
@@ -41,8 +44,12 @@ class OddsApiClient:
         resp = requests.get(url, params=params, timeout=30)
         remaining = resp.headers.get("x-requests-remaining")
         used = resp.headers.get("x-requests-used")
+        last = resp.headers.get("x-requests-last")
         if remaining is not None:
-            logger.info("Odds API usage for %s: used=%s remaining=%s", log_label, used, remaining)
+            logger.info(
+                "Odds API usage for %s: used=%s remaining=%s cost_of_this_call=%s",
+                log_label, used, remaining, last,
+            )
         if resp.status_code != 200:
             raise OddsApiError(
                 f"The Odds API returned {resp.status_code} for {log_label}: {resp.text[:500]}"

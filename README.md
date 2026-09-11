@@ -16,10 +16,11 @@ tracks your bankroll and performance over time.
 2. Per sport, it first hits the free `/events` endpoint (no quota cost) to check whether
    anything's even upcoming — if not, it skips the paid odds call entirely. Otherwise it
    pulls NFL/NBA/NHL/MLB odds (moneyline, spread, totals) from
-   [The Odds API](https://the-odds-api.com/) via `bookmakers=` (Pinnacle + your 6 Ontario
-   books, see `config/bookmakers.yaml`) rather than `regions=` — The Odds API prices every
-   group of ≤10 named bookmakers as 1 region-equivalent, so our 7 books cost half of what
-   `regions=eu,ca` would for the same data.
+   [The Odds API](https://the-odds-api.com/) via `regions=eu,ca` (`eu` for Pinnacle, `ca`
+   for your 6 Ontario books — the confirmed cost formula is `markets × regions`, so this
+   is 2 regions; a `bookmakers=` allowlist was considered as a cheaper alternative but its
+   cost behavior isn't documented, so we stuck with the formula that's actually confirmed).
+   At 4 sports × 3 markets × 2 regions × 3 scans/day, that's ~2,160 credits/month.
 3. For each market, it devigs Pinnacle's two-way price into a true win probability
    (`src/betbot/devig.py`), then checks every Ontario book's price against that true
    probability (`src/betbot/ev.py`). Anything at or above the EV threshold in

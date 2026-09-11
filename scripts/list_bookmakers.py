@@ -26,11 +26,11 @@ def main() -> None:
         odds_format=settings.odds_format,
     )
     keys = sorted(
-        client.list_bookmaker_keys(sport_key, markets=["h2h"], regions=settings.discovery_regions)
+        client.list_bookmaker_keys(sport_key, markets=["h2h"], regions=settings.odds_api_regions)
     )
     print(
         f"Bookmaker keys currently returned for {sport_key} "
-        f"(discovery regions={settings.discovery_regions}):\n"
+        f"(regions={settings.odds_api_regions}):\n"
     )
     for key in keys:
         tag = " <- in our allowlist" if key in (settings.sharp_book_keys + settings.ontario_known_keys) else ""

@@ -308,7 +308,7 @@ def run() -> None:
             events = odds_client.get_odds(
                 sport_key,
                 markets,
-                bookmakers=settings.scan_bookmakers,
+                regions=settings.odds_api_regions,
                 commence_time_from=window_from,
                 commence_time_to=window_to,
                 include_links=True,
