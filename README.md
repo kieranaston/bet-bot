@@ -45,8 +45,10 @@ Sign up at https://the-odds-api.com/ (the free tier is enough to start). Copy yo
 GitHub Actions runners are thrown away after every run, so bankroll/bet history can't
 live in a local SQLite file there. The free path:
 1. Create a free project at https://supabase.com/.
-2. Project Settings → Database → Connection string → **URI** tab. Copy it
-   (`postgresql://postgres:[password]@...`).
+2. Project Settings → Database → Connection string → **Session pooler** tab (not "URI" /
+   direct connection — Supabase's direct connection is IPv6-only on new projects, and
+   GitHub Actions runners have no IPv6 route, so it fails with "Network is unreachable").
+   Copy it (`postgresql://postgres.[project-ref]:[password]@aws-0-[region].pooler.supabase.com:5432/postgres`).
 3. That's your `DATABASE_URL`.
 
 (If you instead run this on a VPS or your own machine via cron — see "Alternative:
