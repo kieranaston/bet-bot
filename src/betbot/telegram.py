@@ -1,0 +1,50 @@
+"""Minimal Telegram Bot API client -- just HTTP calls, no long-running polling.
+
+We use getUpdates in short-poll mode (called once per scheduled run, with an offset stored
+in the DB) rather than python-telegram-bot's polling loop, because this bot runs as a
+periodic GitHub Actions job, not a persistent process. See betbot.commands for how incoming
+messages are turned into actions.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Any
+
+import requests
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TelegramClient:
+    bot_token: str
+    chat_id: str
+
+    @property
+    def _base_url(self) -> str:
+        return f"https://api.telegram.org/bot{self.bot_token}"
+
+    def send_message(self, text: str, parse_mode: str = "Markdown") -> None:
+        resp = requests.post(
+            f"{self._base_url}/sendMessage",
+            json={
+                "chat_id": self.chat_id,
+                "text": text,
+                "parse_mode": parse_mode,
+                "disable_web_page_preview": True,
+            },
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            logger.error("Telegram sendMessage failed: %s", resp.text[:500])
+
+    def get_updates(self, offset: int | None) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"timeout": 0}
+        if offset is not None:
+            params["offset"] = offset
+        resp = requests.get(f"{self._base_url}/getUpdates", params=params, timeout=15)
+        if resp.status_code != 200:
+            logger.error("Telegram getUpdates failed: %s", resp.text[:500])
+            return []
+        return resp.json().get("result", [])

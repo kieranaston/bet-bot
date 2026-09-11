@@ -1,0 +1,53 @@
+# Core bot settings. Secrets (API keys, tokens, DB URL) live in .env / GitHub Actions secrets,
+# never here.
+
+bankroll:
+  # Starting bankroll in your unit currency (CAD). The bot's "current" bankroll is tracked in
+  # the database and updated via the /bankroll Telegram command or automatically from settled
+  # bets. This value is only used the very first time the database is initialized.
+  starting_amount: 1000.0
+  kelly_fraction: 0.25          # quarter Kelly
+  max_stake_pct_of_bankroll: 0.05   # hard safety cap per bet, regardless of Kelly output
+  min_stake: 1.0                # don't bother alerting a stake below this
+
+ev:
+  min_ev_pct: 2.0               # only alert when EV >= this percent
+  # Devig method for turning sharp two-way odds into "true" probabilities.
+  # "multiplicative" (basic proportional devig) is the only one implemented in v1.
+  devig_method: multiplicative
+
+sports:
+  # The Odds API sport keys. Main markets only for v1 (moneyline / spread / totals).
+  - key: americanfootball_nfl
+    markets: [h2h, spreads, totals]
+  - key: basketball_nba
+    markets: [h2h, spreads, totals]
+  - key: icehockey_nhl
+    markets: [h2h, spreads, totals]
+  - key: baseball_mlb
+    markets: [h2h, spreads, totals]
+
+odds_api:
+  # Comma-separated regions passed to The Odds API. We only need "eu" (for Pinnacle) and
+  # "ca" (for Ontario-licensed books) -- requesting fewer regions keeps API usage/cost down.
+  regions: "eu,ca"
+  odds_format: decimal
+  base_url: "https://api.the-odds-api.com/v4"
+
+scheduling:
+  # Adaptive re-alert cooldown tiers, keyed by hours-to-commence -> minimum minutes between
+  # re-alerting the *same* (event, market, bookmaker, outcome) unless the price moves.
+  # The actual scan frequency is controlled by the GitHub Actions cron in
+  # .github/workflows/scan.yml; this just prevents alert spam between runs.
+  tiers:
+    - max_hours_to_commence: 1
+      cooldown_minutes: 5
+    - max_hours_to_commence: 6
+      cooldown_minutes: 15
+    - max_hours_to_commence: 24
+      cooldown_minutes: 60
+    - max_hours_to_commence: 999999
+      cooldown_minutes: 120
+  # Don't bother processing events further out than this -- lines aren't liquid/final yet
+  # and re-checking them wastes API credits.
+  max_hours_ahead: 168   # 7 days

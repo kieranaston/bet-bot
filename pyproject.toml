@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "betbot"
+version = "0.1.0"
+description = "Finds +EV bets at Ontario sportsbooks vs. sharp reference odds and alerts via Telegram."
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31",
+    "SQLAlchemy>=2.0",
+    "psycopg2-binary>=2.9",
+    "PyYAML>=6.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
