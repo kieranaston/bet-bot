@@ -1,5 +1,6 @@
-"""Entry point: process any pending Telegram commands, then scan configured sports/markets
-for +EV lines at Ontario books (vs. Pinnacle as the sharp reference) and alert on them.
+"""Entry point: process any pending Telegram commands, auto-settle finished bets, then
+scan configured sports/markets for +EV lines at Ontario books (vs. Pinnacle as the sharp
+reference) and alert on them.
 
 Run via: python -m betbot.main
 Intended to be invoked on a schedule by .github/workflows/scan.yml (or a local cron / VPS
@@ -9,11 +10,12 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+from zoneinfo import ZoneInfo
 
-from betbot import commands
+from betbot import commands, settlement
 from betbot.config import Secrets, settings
-from betbot.ev import ev_pct
 from betbot.devig import devig
+from betbot.ev import ev_pct
 from betbot.kelly import stake_amount
 from betbot.odds_client import OddsApiClient, OddsApiError
 from betbot.scheduler import is_scan_time, should_alert
@@ -25,11 +27,21 @@ logger = logging.getLogger("betbot.main")
 
 PRICE_CHANGE_EPSILON = 0.02  # decimal odds points; smaller moves don't count as "changed"
 
-MARKET_LABELS = {"h2h": "Moneyline", "spreads": "Spread", "totals": "Total"}
+MARKET_LABELS = {"h2h": "ML", "spreads": "Spread", "totals": "Total"}
 
 
-def extract_outcomes(market: dict) -> list[tuple[str, float | None, float]]:
-    return [(o["name"], o.get("point"), float(o["price"])) for o in market.get("outcomes", [])]
+def extract_outcomes(
+    market: dict, book_bm: dict
+) -> list[tuple[str, float | None, float, str | None]]:
+    """Returns (name, point, price, deep_link) per outcome. deep_link prefers the most
+    specific link The Odds API offers (outcome > market > bookmaker/event), falling back
+    to None if `includeLinks=true` didn't return one for this book."""
+    bm_link = book_bm.get("link")
+    market_link = market.get("link") or bm_link
+    return [
+        (o["name"], o.get("point"), float(o["price"]), o.get("link") or market_link)
+        for o in market.get("outcomes", [])
+    ]
 
 
 def find_market(bookmaker: dict, market_key: str) -> dict | None:
@@ -68,24 +80,24 @@ def process_event(
         sharp_market = find_market(sharp_bm, market_key)
         if not sharp_market:
             continue
-        sharp_outcomes = extract_outcomes(sharp_market)
+        sharp_outcomes = extract_outcomes(sharp_market, sharp_bm)
         if len(sharp_outcomes) < 2:
             continue
         try:
             true_probs = devig(
-                [price for _, _, price in sharp_outcomes], method=settings.devig_method
+                [price for _, _, price, _ in sharp_outcomes], method=settings.devig_method
             )
         except ValueError:
             continue
         sharp_lookup = {
-            (name, point): p for (name, point, _), p in zip(sharp_outcomes, true_probs)
+            (name, point): p for (name, point, _, _), p in zip(sharp_outcomes, true_probs)
         }
 
         for book_bm in ontario_bms:
             book_market = find_market(book_bm, market_key)
             if not book_market:
                 continue
-            for name, point, price in extract_outcomes(book_market):
+            for name, point, price, link in extract_outcomes(book_market, book_bm):
                 true_prob = sharp_lookup.get((name, point))
                 if true_prob is None:
                     continue  # line doesn't match the sharp book's current line -- skip
@@ -115,6 +127,7 @@ def process_event(
                     point=point,
                     bookmaker_key=book_bm["key"],
                     price=price,
+                    deep_link=link,
                     true_prob=true_prob,
                     ev=ev,
                     stake=stake,
@@ -135,6 +148,7 @@ def _upsert_and_maybe_notify(
     point: float | None,
     bookmaker_key: str,
     price: float,
+    deep_link: str | None,
     true_prob: float,
     ev: float,
     stake: float,
@@ -167,6 +181,7 @@ def _upsert_and_maybe_notify(
                 point=point,
                 bookmaker_key=bookmaker_key,
                 book_odds=price,
+                deep_link=deep_link,
                 sharp_book_key=settings.sharp_book_keys[0],
                 true_prob=true_prob,
                 ev_pct=ev,
@@ -182,6 +197,7 @@ def _upsert_and_maybe_notify(
                 return 0  # user already acted on this -- don't re-alert
             price_changed = abs(existing.book_odds - price) >= PRICE_CHANGE_EPSILON
             existing.book_odds = price
+            existing.deep_link = deep_link
             existing.true_prob = true_prob
             existing.ev_pct = ev
             existing.recommended_stake = stake
@@ -203,22 +219,34 @@ def _upsert_and_maybe_notify(
         return 1
 
 
+def _outcome_display(alert: Alert) -> str:
+    if alert.market == "spreads" and alert.point is not None:
+        return f"{alert.outcome_name} {alert.point:+g}"
+    if alert.market == "totals" and alert.point is not None:
+        return f"{alert.outcome_name} {alert.point:g}"
+    return alert.outcome_name
+
+
+def _local_time_str(commence_time: dt.datetime) -> str:
+    local = commence_time.astimezone(ZoneInfo(settings.timezone))
+    hour12 = local.hour % 12 or 12
+    ampm = "am" if local.hour < 12 else "pm"
+    return f"{local.strftime('%a')} {hour12}:{local.minute:02d}{ampm} ET"
+
+
 def _send_alert_message(telegram: TelegramClient, alert: Alert) -> None:
-    point_str = f" {alert.point:+g}" if alert.point is not None else ""
     label = MARKET_LABELS.get(alert.market, alert.market)
-    text = (
-        f"*+EV Bet Found* (#{alert.id})\n"
-        f"{alert.away_team} @ {alert.home_team}\n"
-        f"{label}: *{alert.outcome_name}{point_str}*\n"
-        f"Book: {settings.display_name(alert.bookmaker_key)} @ {alert.book_odds:.2f}\n"
-        f"Sharp true prob: {alert.true_prob * 100:.1f}% "
-        f"(via {settings.display_name(alert.sharp_book_key)})\n"
-        f"*EV: +{alert.ev_pct:.1f}%*\n"
-        f"Suggested stake (1/4 Kelly): *${alert.recommended_stake:,.2f}*\n"
-        f"Game starts: {alert.commence_time.strftime('%a %b %d, %I:%M %p UTC')}\n\n"
-        f"Reply `/placed {alert.id}` to log this bet, `/skip {alert.id}` to dismiss."
-    )
-    telegram.send_message(text)
+    book = settings.display_name(alert.bookmaker_key)
+
+    lines = [
+        f"*+{alert.ev_pct:.1f}% EV* · {label}: {_outcome_display(alert)} @ {alert.book_odds:.2f} ({book})",
+        f"{alert.away_team} @ {alert.home_team} · {_local_time_str(alert.commence_time)}",
+        f"Stake ${alert.recommended_stake:,.2f} · true {alert.true_prob * 100:.0f}%",
+    ]
+    if alert.deep_link:
+        lines.append(f"[Bet slip]({alert.deep_link})")
+    lines.append(f"`/placed {alert.id}`  `/skip {alert.id}`")
+    telegram.send_message("\n".join(lines))
 
 
 def run() -> None:
@@ -248,17 +276,43 @@ def run() -> None:
     odds_client = OddsApiClient(
         api_key=secrets.odds_api_key,
         base_url=settings.odds_api_base_url,
-        regions=settings.odds_api_regions,
         odds_format=settings.odds_format,
     )
 
-    # 3. Scan configured sports/markets for +EV lines.
+    # 3. Auto-settle any placed bets whose games have finished (cheap flat-rate /scores
+    # call, only for sports with something actually pending).
+    if settings.settlement_enabled:
+        settled = settlement.auto_settle_pending(db, settings, telegram, odds_client)
+        if settled:
+            logger.info("Auto-settled %d bet(s).", settled)
+
+    # 4. Scan configured sports/markets for +EV lines.
     bankroll = db.current_bankroll(settings.starting_bankroll)
+    window_from = now
+    window_to = now + dt.timedelta(hours=settings.max_hours_ahead)
     total_alerts = 0
     for sport in settings.sports:
         sport_key, markets = sport["key"], sport["markets"]
+
+        # Free precheck: skip the paid /odds call entirely if nothing's on the schedule.
         try:
-            events = odds_client.get_odds(sport_key, markets)
+            upcoming = odds_client.get_events(sport_key, window_from, window_to)
+        except OddsApiError:
+            logger.exception("Failed to fetch events for %s", sport_key)
+            continue
+        if not upcoming:
+            logger.info("No upcoming %s events in window -- skipping odds fetch.", sport_key)
+            continue
+
+        try:
+            events = odds_client.get_odds(
+                sport_key,
+                markets,
+                bookmakers=settings.scan_bookmakers,
+                commence_time_from=window_from,
+                commence_time_to=window_to,
+                include_links=True,
+            )
         except OddsApiError:
             logger.exception("Failed to fetch odds for %s", sport_key)
             continue

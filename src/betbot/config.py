@@ -87,8 +87,8 @@ class Settings:
         return self._raw["sports"]
 
     @property
-    def odds_api_regions(self) -> str:
-        return str(self._raw["odds_api"]["regions"])
+    def discovery_regions(self) -> str:
+        return str(self._raw["odds_api"]["discovery_regions"])
 
     @property
     def odds_format(self) -> str:
@@ -121,12 +121,27 @@ class Settings:
         return float(self._raw["scheduling"]["max_hours_ahead"])
 
     @property
+    def settlement_enabled(self) -> bool:
+        return bool(self._raw["settlement"]["enabled"])
+
+    @property
+    def settlement_days_from(self) -> int:
+        return int(self._raw["settlement"]["days_from"])
+
+    @property
     def sharp_book_keys(self) -> list[str]:
         return list(self._bookmakers["sharp"]["known_keys"])
 
     @property
     def ontario_known_keys(self) -> list[str]:
         return list(self._bookmakers["ontario"]["known_keys"])
+
+    @property
+    def scan_bookmakers(self) -> str:
+        """Comma-separated bookmaker keys for the `bookmakers=` param on real scans --
+        Pinnacle + our confirmed Ontario books. 7 keys total, so this prices as 1
+        region-equivalent (every group of <=10 named bookmakers = 1 region-equivalent)."""
+        return ",".join(self.sharp_book_keys + self.ontario_known_keys)
 
     @property
     def ontario_auto_match_suffixes(self) -> list[str]:

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 
+from betbot import settlement
 from betbot.config import Settings
 from betbot.storage import Alert, Database
 
@@ -131,25 +132,15 @@ def _cmd_settle(db: Database, settings: Settings, args: list[str]) -> str:
             return f"No alert #{alert_id} found."
         if not alert.placed_stake:
             return f"Alert #{alert_id} was never marked /placed -- nothing to settle."
+        if alert.status.startswith("settled_"):
+            return f"Alert #{alert_id} is already settled ({alert.status})."
 
-        if outcome == "win":
-            profit = alert.placed_stake * (alert.book_odds - 1.0)
-        elif outcome == "loss":
-            profit = -alert.placed_stake
-        else:
-            profit = 0.0
-
-        alert.status = f"settled_{outcome}"
-        alert.profit = round(profit, 2)
         if closing_odds is not None:
             alert.closing_odds = closing_odds
 
-        current = db.current_bankroll(settings.starting_bankroll)
-        new_bankroll = round(current + profit, 2)
-        db.set_bankroll(new_bankroll, reason=f"settle alert #{alert_id} ({outcome})")
-
+        new_bankroll = settlement.apply_settlement(db, settings, alert, outcome)
         return (
-            f"Settled #{alert_id} as {outcome.upper()}: {profit:+.2f}. "
+            f"Settled #{alert_id} as {outcome.upper()}: {alert.profit:+.2f}. "
             f"Bankroll now ${new_bankroll:,.2f}"
         )
 

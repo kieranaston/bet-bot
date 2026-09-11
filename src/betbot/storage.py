@@ -69,6 +69,7 @@ class Alert(Base):
     true_prob = Column(Float, nullable=False)
     ev_pct = Column(Float, nullable=False)
     recommended_stake = Column(Float, nullable=False)
+    deep_link = Column(String, nullable=True)  # direct betslip/event link, if the book offers one
 
     # Lifecycle: new -> notified -> placed|skipped -> settled_win|settled_loss|settled_push
     status = Column(String, nullable=False, default="new")

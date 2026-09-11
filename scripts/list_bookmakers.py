@@ -23,13 +23,17 @@ def main() -> None:
     client = OddsApiClient(
         api_key=secrets.odds_api_key,
         base_url=settings.odds_api_base_url,
-        regions=settings.odds_api_regions,
         odds_format=settings.odds_format,
     )
-    keys = sorted(client.list_bookmaker_keys(sport_key, markets=["h2h"]))
-    print(f"Bookmaker keys currently returned for {sport_key} (regions={settings.odds_api_regions}):\n")
+    keys = sorted(
+        client.list_bookmaker_keys(sport_key, markets=["h2h"], regions=settings.discovery_regions)
+    )
+    print(
+        f"Bookmaker keys currently returned for {sport_key} "
+        f"(discovery regions={settings.discovery_regions}):\n"
+    )
     for key in keys:
-        tag = " <- Ontario (auto-matched)" if settings.is_ontario_book(key) else ""
+        tag = " <- in our allowlist" if key in (settings.sharp_book_keys + settings.ontario_known_keys) else ""
         print(f"  {key}{tag}")
 
 

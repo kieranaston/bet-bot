@@ -13,25 +13,36 @@ tracks your bankroll and performance over time.
    Eastern clock time via `betbot.scheduler.is_scan_time`, not a fixed UTC cron, so it
    stays correct across daylight saving changes). Telegram command handling (`/placed`,
    `/skip`, `/settle`, etc.) still runs every 10-minute tick since it's free.
-2. During a scan, it pulls upcoming NFL/NBA/NHL/MLB odds (moneyline, spread, totals) from
-   [The Odds API](https://the-odds-api.com/), for Pinnacle (sharp reference, region `eu`)
-   and your six confirmed Ontario books (region `ca`, see `config/bookmakers.yaml`).
+2. Per sport, it first hits the free `/events` endpoint (no quota cost) to check whether
+   anything's even upcoming — if not, it skips the paid odds call entirely. Otherwise it
+   pulls NFL/NBA/NHL/MLB odds (moneyline, spread, totals) from
+   [The Odds API](https://the-odds-api.com/) via `bookmakers=` (Pinnacle + your 6 Ontario
+   books, see `config/bookmakers.yaml`) rather than `regions=` — The Odds API prices every
+   group of ≤10 named bookmakers as 1 region-equivalent, so our 7 books cost half of what
+   `regions=eu,ca` would for the same data.
 3. For each market, it devigs Pinnacle's two-way price into a true win probability
    (`src/betbot/devig.py`), then checks every Ontario book's price against that true
    probability (`src/betbot/ev.py`). Anything at or above the EV threshold in
    `config/settings.yaml` (default 2%) gets sized with quarter-Kelly
-   (`src/betbot/kelly.py`) against your current bankroll and sent to you on Telegram.
+   (`src/betbot/kelly.py`) against your current bankroll and sent to you on Telegram,
+   including a direct bet-slip link when the book provides one (`includeLinks=true`).
 4. It won't spam you: each (event, market, outcome, book) combination is only re-alerted
    after a cooldown that tightens as game time approaches, or immediately if the price
    moves (`src/betbot/scheduler.py`, tunable in `config/settings.yaml`).
-5. You reply in Telegram:
+5. Before scanning for new opportunities, it also auto-settles any bet you've logged as
+   `/placed` whose game has finished, using The Odds API's `/scores` endpoint (flat 2
+   credits/request, only called for sports with something actually pending) —
+   `src/betbot/settlement.py` grades moneyline/spread/total outcomes from the final score
+   and updates your bankroll automatically. You can still `/settle` manually if you want to
+   record the closing line for CLV, or if you'd rather not wait for the next scan window.
+6. You reply in Telegram:
    - `/placed <id> [stake]` — log that you bet it (defaults to the suggested stake)
    - `/skip <id>` — dismiss it
-   - `/settle <id> win|loss|push [closing_odds]` — grade it; updates your bankroll and
-     (if you pass the closing line) tracks closing-line value (CLV)
+   - `/settle <id> win|loss|push [closing_odds]` — grade it manually; updates your bankroll
+     and (if you pass the closing line) tracks closing-line value (CLV)
    - `/bankroll [amount]` — check or manually correct your bankroll
    - `/status` — list bets you've placed that aren't settled yet
-6. A second workflow (`.github/workflows/daily_report.yml`) sends a daily digest:
+7. A second workflow (`.github/workflows/daily_report.yml`) sends a daily digest:
    bankroll, open bets, win/loss record, ROI, average CLV.
 
 ## First-time setup
@@ -59,6 +70,14 @@ live in a local SQLite file there. The free path:
 (If you instead run this on a VPS or your own machine via cron — see "Alternative:
 running without GitHub Actions" below — you can skip this and just let it use the default
 local SQLite file at `data/betbot.db`.)
+
+**Already ran a scan before this update?** The `alerts` table needs one new column. In
+Supabase's SQL Editor, run:
+```sql
+ALTER TABLE alerts ADD COLUMN IF NOT EXISTS deep_link VARCHAR;
+```
+(A fresh install doesn't need this — `Database.__init__` creates the table with the new
+column already included.)
 
 ### 4. Add secrets to the GitHub repo
 In the repo on GitHub: **Settings → Secrets and variables → Actions → New repository
@@ -122,11 +141,12 @@ GitHub Actions — e.g. for tighter in-play scan intervals — nothing in the co
 config/settings.yaml     bankroll, Kelly fraction, EV threshold, sports/markets, cooldowns
 config/bookmakers.yaml    sharp book + Ontario book keys
 src/betbot/
-  odds_client.py          The Odds API wrapper
+  odds_client.py          The Odds API wrapper (/events, /odds, /scores)
   devig.py                vig removal -> true probabilities
   ev.py                   true prob vs. book price -> EV%
   kelly.py                quarter-Kelly stake sizing
-  scheduler.py            adaptive re-alert cooldown
+  scheduler.py            scan-window gating (DST-safe) + adaptive re-alert cooldown
+  settlement.py           win/loss/push grading + auto-settle via /scores
   storage.py              SQLAlchemy models (alerts, bankroll history, kv state)
   telegram.py             Telegram Bot API client (send + short-poll getUpdates)
   commands.py             parses /placed, /skip, /settle, /bankroll, /status
@@ -146,11 +166,18 @@ scripts/
 
 - Devig uses the basic multiplicative method, not Shin's method — fine for liquid
   two-way markets (moneyline/spread/totals), which is all this targets.
-- Bet settlement (`/settle`) is manual — there's no automatic score-checking yet.
 - No player props (main markets only), per initial scope.
 - Line matching between Pinnacle and the Ontario book requires an exact point match for
   spreads/totals; if a book's line differs from Pinnacle's, that outcome is skipped rather
   than approximated.
+- Auto-settlement only checks games within `settlement.days_from` (2 days) of finishing,
+  and only runs during the 3x/day scan window — a bet can sit unsettled for a few hours
+  after its game ends before the next scan catches it. `/settle` still works manually if
+  you don't want to wait.
+- The exact JSON field(s) `includeLinks=true` returns aren't fully documented by The Odds
+  API; `extract_outcomes` in `main.py` tries `outcome.link` → `market.link` →
+  `bookmaker.link` and falls back to no link if none are present. Worth double-checking
+  against real response data the first time this runs live.
 
 ## Responsible use
 

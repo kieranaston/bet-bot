@@ -28,11 +28,15 @@ sports:
     markets: [h2h, spreads, totals]
 
 odds_api:
-  # Comma-separated regions passed to The Odds API. We only need "eu" (for Pinnacle) and
-  # "ca" (for Ontario-licensed books) -- requesting fewer regions keeps API usage/cost down.
-  regions: "eu,ca"
+  # Real scans use `bookmakers=<our 7 keys>` (built from config/bookmakers.yaml), not
+  # `regions=`, since The Odds API prices every group of <=10 named bookmakers as 1
+  # region-equivalent -- our 7 books (Pinnacle + 6 Ontario) cost half of what `regions=eu,ca`
+  # would (1 region-equivalent instead of 2), for identical data.
   odds_format: decimal
   base_url: "https://api.the-odds-api.com/v4"
+  # Only used by scripts/list_bookmakers.py for broad discovery of what The Odds API
+  # currently returns -- not used for real scans.
+  discovery_regions: "eu,ca"
 
 scheduling:
   # We only spend Odds API credits 3x/day, at these local times. Checked in real Eastern
@@ -59,3 +63,12 @@ scheduling:
   # Don't bother processing events further out than this -- lines aren't liquid/final yet
   # and re-checking them wastes API credits.
   max_hours_ahead: 168   # 7 days
+
+settlement:
+  # Auto-settle placed bets using The Odds API's /scores endpoint (flat 2 credits/request
+  # with days_from set) instead of requiring a manual /settle for every bet. Runs inside
+  # the same 3x/day scan window, and only for sports with at least one placed-but-unsettled
+  # bet -- so it costs nothing on days with nothing to settle.
+  enabled: true
+  # How many past days of completed games to look back over (max 3, per Odds API limit).
+  days_from: 2
