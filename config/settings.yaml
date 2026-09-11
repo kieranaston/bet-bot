@@ -28,12 +28,13 @@ sports:
     markets: [h2h, spreads, totals]
 
 odds_api:
-  # Confirmed cost formula (The Odds API docs): cost = [markets] x [regions]. We only
-  # need "eu" (for Pinnacle) and "ca" (for our Ontario books). `bookmakers=` was tried as
-  # a possible cheaper alternative, but its cost behavior isn't documented (the docs'
-  # quota-cost examples only ever show `regions=`), so we stick with the confirmed formula
-  # rather than guess. odds_client.py logs the `x-requests-last` header on every call if
-  # you want to empirically test `bookmakers=` cost later.
+  # Confirmed cost formula (The Odds API docs, api-docs/docs_markdown/ crawled 2026-09-11):
+  # cost = [markets] x [region-equivalents]. The `bookmakers=` param is confirmed cheaper
+  # for us: "every group of 10 bookmakers is the equivalent of 1 region" (docs, verbatim).
+  # Our 7 books (Pinnacle + 6 Ontario) are <=10, so `bookmakers=` costs 1 region-equivalent
+  # instead of the 2 regions `regions=eu,ca` would cost for the same data -- real scans use
+  # `bookmakers=` (built from config/bookmakers.yaml). `regions` below is kept only for
+  # scripts/list_bookmakers.py's broad discovery use.
   regions: "eu,ca"
   odds_format: decimal
   base_url: "https://api.the-odds-api.com/v4"

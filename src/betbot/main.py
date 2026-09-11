@@ -295,7 +295,8 @@ def run() -> None:
     for sport in settings.sports:
         sport_key, markets = sport["key"], sport["markets"]
 
-        # Free precheck: skip the paid /odds call entirely if nothing's on the schedule.
+        # Free precheck (an empty /odds response also costs 0, per the docs, but this
+        # skips an unnecessary round-trip/rate-limit hit for sports with nothing upcoming).
         try:
             upcoming = odds_client.get_events(sport_key, window_from, window_to)
         except OddsApiError:
@@ -309,7 +310,7 @@ def run() -> None:
             events = odds_client.get_odds(
                 sport_key,
                 markets,
-                regions=settings.odds_api_regions,
+                bookmakers=settings.scan_bookmakers,
                 commence_time_from=window_from,
                 commence_time_to=window_to,
                 include_links=True,

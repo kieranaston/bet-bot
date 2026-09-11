@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+api-docs/.venv-docs/
 *.egg-info/
 build/
 dist/

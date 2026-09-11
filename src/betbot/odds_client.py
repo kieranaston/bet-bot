@@ -1,17 +1,19 @@
 """Thin wrapper around The Odds API v4 (https://the-odds-api.com/liveapi/guides/v4/).
 
-Covers three endpoints:
-  - /sports/{sport}/events  -- free (no quota cost), used to check whether a sport has
-    anything upcoming before spending credits on /odds.
-  - /sports/{sport}/odds    -- the paid endpoint. Confirmed cost formula (Odds API docs):
-    cost = [markets] x [regions]. Real scans use `regions=` (see config/settings.yaml),
-    not `bookmakers=` -- the docs' quota-cost examples only ever show `regions=`, so a
-    bookmakers-based discount isn't confirmed. get_odds() still supports `bookmakers=`
-    for anyone who wants to test its actual cost empirically (check the
-    `x-requests-last` value this module logs on every call).
-  - /sports/{sport}/scores  -- confirmed: 1 credit/request normally, 2 credits if
-    `daysFrom` is set (needed to see completed games) -- used for automatic bet
-    settlement instead of a secondary results API.
+Covers three endpoints (cost formulas confirmed against crawled docs in
+api-docs/docs_markdown/, not just an AI summary of the docs page):
+  - /sports/{sport}/events  -- free (no quota cost). An empty /odds response also costs 0,
+    so this precheck saves round-trips/rate-limit headroom rather than credits per se, but
+    it's still used to skip sports with nothing upcoming before even trying /odds.
+  - /sports/{sport}/odds    -- cost = [markets] x [region-equivalents]. Real scans use
+    `bookmakers=` (our fixed 7-book allowlist, built from config/bookmakers.yaml) rather
+    than `regions=`: the docs confirm "every group of 10 bookmakers is the equivalent of
+    1 region", so our 7 books cost 1 region-equivalent instead of the 2 regions
+    `regions=eu,ca` would need for the same data. `regions=` is kept for
+    scripts/list_bookmakers.py's broad discovery use.
+  - /sports/{sport}/scores  -- 1 credit/request normally, 2 credits if `daysFrom` is set
+    (needed to see completed games) -- used for automatic bet settlement instead of a
+    secondary results API.
 """
 from __future__ import annotations
 

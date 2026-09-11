@@ -13,14 +13,15 @@ tracks your bankroll and performance over time.
    Eastern clock time via `betbot.scheduler.is_scan_time`, not a fixed UTC cron, so it
    stays correct across daylight saving changes). Telegram command handling (`/placed`,
    `/skip`, `/settle`, etc.) still runs every 10-minute tick since it's free.
-2. Per sport, it first hits the free `/events` endpoint (no quota cost) to check whether
-   anything's even upcoming — if not, it skips the paid odds call entirely. Otherwise it
-   pulls NFL/NBA/NHL/MLB odds (moneyline, spread, totals) from
-   [The Odds API](https://the-odds-api.com/) via `regions=eu,ca` (`eu` for Pinnacle, `ca`
-   for your 6 Ontario books — the confirmed cost formula is `markets × regions`, so this
-   is 2 regions; a `bookmakers=` allowlist was considered as a cheaper alternative but its
-   cost behavior isn't documented, so we stuck with the formula that's actually confirmed).
-   At 4 sports × 3 markets × 2 regions × 3 scans/day, that's ~2,160 credits/month.
+2. Per sport, it first hits the free `/events` endpoint to check whether anything's even
+   upcoming, skipping the odds call entirely if not (an empty `/odds` response also costs
+   0 credits per the docs, so this mainly saves a round-trip rather than credits). Otherwise
+   it pulls NFL/NBA/NHL/MLB odds (moneyline, spread, totals) from
+   [The Odds API](https://the-odds-api.com/) via `bookmakers=` — Pinnacle + your 6 Ontario
+   books, 7 keys total. The Odds API's docs confirm "every group of 10 bookmakers is the
+   equivalent of 1 region," so our 7 books cost 1 region-equivalent instead of the 2
+   regions `regions=eu,ca` would need for the same data. At 4 sports × 3 markets ×
+   1 region-equivalent × 3 scans/day, that's ~1,080 credits/month.
 3. For each market, it devigs Pinnacle's two-way price into a true win probability
    (`src/betbot/devig.py`), then checks every Ontario book's price against that true
    probability (`src/betbot/ev.py`). Anything at or above the EV threshold in
@@ -175,10 +176,9 @@ scripts/
   and only runs during the 3x/day scan window — a bet can sit unsettled for a few hours
   after its game ends before the next scan catches it. `/settle` still works manually if
   you don't want to wait.
-- The exact JSON field(s) `includeLinks=true` returns aren't fully documented by The Odds
-  API; `extract_outcomes` in `main.py` tries `outcome.link` → `market.link` →
-  `bookmaker.link` and falls back to no link if none are present. Worth double-checking
-  against real response data the first time this runs live.
+- Bookmaker homepage URLs in `config/bookmakers.yaml` (`homepage_urls`, used as the final
+  deep-link fallback) are best-effort guesses, not verified against each book's actual
+  current domain.
 
 ## Responsible use
 

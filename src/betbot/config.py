@@ -137,6 +137,13 @@ class Settings:
         return list(self._bookmakers["ontario"]["known_keys"])
 
     @property
+    def scan_bookmakers(self) -> str:
+        """Comma-separated bookmaker keys for the `bookmakers=` param on real scans --
+        Pinnacle + our confirmed Ontario books. 7 keys total (<=10), confirmed by The Odds
+        API docs to price as 1 region-equivalent instead of 2 (eu + ca)."""
+        return ",".join(self.sharp_book_keys + self.ontario_known_keys)
+
+    @property
     def ontario_auto_match_suffixes(self) -> list[str]:
         return list(self._bookmakers["ontario"]["auto_match_suffixes"])
 
