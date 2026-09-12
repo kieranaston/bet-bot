@@ -7,7 +7,7 @@ tracks your bankroll and performance over time.
 
 ## How it works
 
-1. A GitHub Actions workflow (`.github/workflows/scan.yml`) ticks twice an hour, but
+1. A GitHub Actions workflow (`.github/workflows/betbot-scan.yml`) ticks twice an hour, but
    only actually calls the Odds API 8x/day, evenly every 3 hours (configurable via
    `config/settings.yaml` `scheduling.scan_times_local` — checked in real, DST-aware
    Eastern clock time via `betbot.scheduler.is_scan_time`, not a fixed UTC cron, so it
@@ -121,11 +121,11 @@ secret**. Add all four:
 - `TELEGRAM_CHAT_ID`
 - `DATABASE_URL`
 
-Once these are set, `.github/workflows/scan.yml` will start ticking automatically twice
+Once these are set, `.github/workflows/betbot-scan.yml` will start ticking automatically twice
 an hour, actually scanning 8x/day (see "How it works" above; also triggerable manually
 from the Actions tab via "Run workflow"). **Both scheduled workflows are currently
 disabled** (`gh workflow list --all` to check) — re-enable with
-`gh workflow enable scan.yml` and `gh workflow enable daily_report.yml` when ready.
+`gh workflow enable betbot-scan.yml` and `gh workflow enable daily_report.yml` when ready.
 
 ### 5. Verify your Ontario bookmaker keys
 `config/bookmakers.yaml` is a deliberately closed allowlist — currently `bet99_ca_on`,
@@ -176,7 +176,7 @@ GitHub Actions — e.g. for tighter in-play scan intervals — nothing in the co
    want to keep the same DB either way.
 2. Point cron (or `launchd`/systemd) at `python -m betbot.main` on whatever interval you
    want, and at `python scripts/report.py` once a day.
-3. Delete/disable `.github/workflows/scan.yml` and `daily_report.yml` if you don't want
+3. Delete/disable `.github/workflows/betbot-scan.yml` and `daily_report.yml` if you don't want
    both running redundantly.
 
 ## Project layout
@@ -201,7 +201,7 @@ scripts/
   init_db.py               creates tables / seeds bankroll
   report.py                daily digest sender
 .github/workflows/
-  scan.yml                 ticks twice hourly, actually scans 8x/day (see scan_times_local)
+  betbot-scan.yml          ticks twice hourly, actually scans 8x/day (see scan_times_local)
   daily_report.yml         sends the daily digest
   tests.yml                runs pytest on push/PR
 ```

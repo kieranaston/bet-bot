@@ -3,7 +3,7 @@ scan configured sports/markets for +EV lines at Ontario books (vs. Pinnacle as t
 reference) and alert on them.
 
 Run via: python -m betbot.main
-Intended to be invoked on a schedule by .github/workflows/scan.yml (or a local cron / VPS
+Intended to be invoked on a schedule by .github/workflows/betbot-scan.yml (or a local cron / VPS
 scheduler -- see README for both options).
 """
 from __future__ import annotations

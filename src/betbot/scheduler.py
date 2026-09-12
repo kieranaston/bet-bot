@@ -1,6 +1,6 @@
 """Scan-time gating and adaptive re-alert cooldown.
 
-The GitHub Actions cron in .github/workflows/scan.yml ticks a couple of times an hour so
+The GitHub Actions cron in .github/workflows/betbot-scan.yml ticks a couple of times an hour so
 Telegram commands stay responsive, but we only want to actually spend Odds API credits a
 few times a day. `is_scan_time` decides that using real Eastern clock time (DST-aware, via
 zoneinfo) so the schedule stays correct across the November/March clock changes without

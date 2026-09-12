@@ -90,7 +90,7 @@ odds_api:
 
 scheduling:
   # We spend Odds API credits 8x/day (every 3 hours), at these local times. Checked in real
-  # Eastern clock time (DST-aware via zoneinfo) -- .github/workflows/scan.yml ticks twice
+  # Eastern clock time (DST-aware via zoneinfo) -- .github/workflows/betbot-scan.yml ticks twice
   # an hour, but betbot.main only actually calls the Odds API when "now" falls within
   # `scan_window_minutes` of one of these times. Window is 30 min (not 10) so a delayed
   # :08 UTC tick still counts as the :00 ET scan, without overlapping the :38 command-only

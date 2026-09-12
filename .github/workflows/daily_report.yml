@@ -2,8 +2,8 @@ name: Daily bankroll/performance report
 
 on:
   schedule:
-    # Two fixed UTC times -- unlike scan.yml this workflow does no Telegram polling, so
-    # there's no reason to run it on scan.yml's twice-hourly cadence just to check a time
+    # Two fixed UTC times -- unlike betbot-scan.yml this workflow does no Telegram polling, so
+    # there's no reason to run it on betbot-scan.yml's twice-hourly cadence just to check a time
     # gate. 13:00 UTC = 9am ET during EDT (summer), 14:00 UTC = 9am ET during EST (winter);
     # scripts/report.py's DST-aware is_scan_time check (against config/settings.yaml
     # `reporting.time_local`) makes exactly one of these two actually send the report each

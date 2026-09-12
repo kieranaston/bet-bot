@@ -9,8 +9,10 @@ on:
     # lands inside each Eastern :00 scan window (see config/settings.yaml
     # `scheduling.scan_times_local` / `scan_window_minutes`). betbot.main only calls the
     # Odds API when local Eastern time is in one of those windows.
-    # NOTE: if schedules stop firing after a cron edit, nudge these minutes (and/or
-    # disable+re-enable the workflow) -- GitHub's scheduler can stick on a stale registration.
+    #
+    # Renamed from scan.yml -> betbot-scan.yml to force a fresh GitHub workflow ID / schedule
+    # registration after cron edits left the old scheduler entry stuck (manual dispatch still
+    # worked; schedule events did not).
     - cron: "8 * * * *"
     - cron: "38 * * * *"
   workflow_dispatch: {}
