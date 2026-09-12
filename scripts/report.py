@@ -34,8 +34,7 @@ def main() -> None:
     with db.session() as s:
         all_alerts = s.query(Alert).all()
         open_bets = [a for a in all_alerts if a.status == "placed"]
-
-    perf = summarize(all_alerts)
+        perf = summarize(all_alerts)
 
     lines = [
         "*Daily Bet Bot Report*",
