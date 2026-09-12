@@ -93,7 +93,7 @@ scheduling:
   # Eastern clock time (DST-aware via zoneinfo) -- .github/workflows/scan.yml ticks twice
   # an hour, but betbot.main only actually calls the Odds API when "now" falls within
   # `scan_window_minutes` of one of these times. Window is 30 min (not 10) so a delayed
-  # :07 UTC tick still counts as the :00 ET scan, without overlapping the :37 command-only
+  # :08 UTC tick still counts as the :00 ET scan, without overlapping the :38 command-only
   # tick. No manual DST edits needed.
   #
   # Deliberately even round-the-clock spacing, not day-of-week or overnight-skipping bursts:

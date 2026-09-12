@@ -30,8 +30,8 @@ There is no lint/format command configured (no ruff/black/flake8 in dependencies
 ## Architecture
 
 `src/betbot/main.py::run()` is the single entry point, invoked on every scheduler tick
-(`.github/workflows/scan.yml`, twice hourly -- GitHub throttles `*/10` so badly that
-commands were sitting unanswered for hours). It does two things unconditionally cheaply,
+(`.github/workflows/scan.yml`, twice hourly at :08/:38 UTC -- GitHub throttles `*/10` so
+badly that commands were sitting unanswered for hours). It does two things unconditionally cheaply,
 then one thing only inside scan windows:
 
 1. **Always**: poll Telegram `getUpdates` and dispatch `/placed`, `/skip`, `/settle`, `/bankroll`,

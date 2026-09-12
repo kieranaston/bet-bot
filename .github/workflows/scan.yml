@@ -5,12 +5,14 @@ on:
     # GitHub's schedule trigger is best-effort and heavily throttles `*/10` (this repo was
     # getting ~3 runs/day instead of 144, so Telegram commands sat unanswered for hours).
     # Twice-hourly at off-peak minutes is delivered much more reliably, stays inside a
-    # typical private-repo Actions allowance (~1,440 billed min/month), and :07 UTC still
+    # typical private-repo Actions allowance (~1,440 billed min/month), and :08 UTC still
     # lands inside each Eastern :00 scan window (see config/settings.yaml
     # `scheduling.scan_times_local` / `scan_window_minutes`). betbot.main only calls the
     # Odds API when local Eastern time is in one of those windows.
-    - cron: "7 * * * *"
-    - cron: "37 * * * *"
+    # NOTE: if schedules stop firing after a cron edit, nudge these minutes (and/or
+    # disable+re-enable the workflow) -- GitHub's scheduler can stick on a stale registration.
+    - cron: "8 * * * *"
+    - cron: "38 * * * *"
   workflow_dispatch: {}
 
 concurrency:
