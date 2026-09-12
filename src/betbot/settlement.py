@@ -11,7 +11,7 @@ import logging
 
 from betbot.config import Settings
 from betbot.odds_client import OddsApiClient, OddsApiError
-from betbot.storage import Alert, Database
+from betbot.storage import Alert, Database, utcnow
 from betbot.telegram import TelegramClient
 
 logger = logging.getLogger(__name__)
@@ -22,6 +22,13 @@ def grade_alert(alert: Alert, home_score: float, away_score: float) -> str | Non
     graded from these two scores (e.g. outcome_name doesn't match either team -- shouldn't
     happen, but we never want to guess a settlement)."""
     if alert.market == "h2h":
+        # Three-way markets (soccer: home/draw/away) have no push on a tied team bet -- a
+        # tie means the draw outcome won, so a home/away bet on the game just loses. Two-way
+        # sports (NFL/NBA/NHL/MLB moneyline) have no draw outcome, so a tie (the rare NFL
+        # regular-season tie) is correctly a push there.
+        is_three_way = alert.sport_key.startswith("soccer_")
+        if alert.outcome_name == "Draw":
+            return "win" if home_score == away_score else "loss"
         if alert.outcome_name == alert.home_team:
             team, opp = home_score, away_score
         elif alert.outcome_name == alert.away_team:
@@ -32,7 +39,7 @@ def grade_alert(alert: Alert, home_score: float, away_score: float) -> str | Non
             return "win"
         if team < opp:
             return "loss"
-        return "push"
+        return "loss" if is_three_way else "push"
 
     if alert.market == "spreads":
         if alert.outcome_name == alert.home_team:
@@ -92,12 +99,19 @@ def apply_settlement(db: Database, settings: Settings, alert: Alert, outcome: st
 def auto_settle_pending(
     db: Database, settings: Settings, telegram: TelegramClient, odds_client: OddsApiClient
 ) -> int:
-    """Checks every placed-but-unsettled bet against The Odds API's /scores endpoint and
-    settles anything whose game has finished. Only calls /scores for sports that actually
-    have a pending bet (skips the call entirely otherwise), and only once per sport per
-    call regardless of how many pending bets that sport has."""
+    """Checks every placed-but-unsettled bet whose game has started against The Odds API's
+    /scores endpoint and settles anything that's finished. Only calls /scores for sports
+    that actually have such a bet (skips the call entirely otherwise, and skips bets whose
+    commence_time hasn't passed yet -- a game that hasn't started can't be `completed`, so
+    querying for it would just burn a flat 2-credit call for nothing every scan until it
+    does), and only once per sport per call regardless of how many pending bets that sport
+    has."""
     with db.session() as s:
-        pending = s.query(Alert).filter(Alert.status == "placed").all()
+        pending = (
+            s.query(Alert)
+            .filter(Alert.status == "placed", Alert.commence_time <= utcnow())
+            .all()
+        )
         if not pending:
             return 0
 
