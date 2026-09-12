@@ -90,6 +90,21 @@ class Alert(Base):
             return f"{self.outcome_name} {self.point:g}"
         return self.outcome_name
 
+    def book_odds_display(self) -> str:
+        """book_odds formatted as American odds (e.g. "+150", "-110") for display only --
+        stored value and all EV/Kelly math stay in decimal, since that's the format The
+        Odds API returns and the formulas in devig.py/ev.py/kelly.py are written for."""
+        return american_odds(self.book_odds)
+
+
+def american_odds(decimal_odds: float) -> str:
+    """Convert decimal odds to an American odds display string, e.g. 2.50 -> "+150",
+    1.91 -> "-110". Display-only conversion -- never feed the result back into decimal-odds
+    math (devig/ev/kelly)."""
+    if decimal_odds >= 2.0:
+        return f"+{round((decimal_odds - 1) * 100):.0f}"
+    return f"{round(-100 / (decimal_odds - 1)):.0f}"
+
 
 class Database:
     def __init__(self, database_url: str) -> None:

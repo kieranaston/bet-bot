@@ -94,49 +94,61 @@ def process_event(
             (name, point): p for (name, point, _, _), p in zip(sharp_outcomes, true_probs)
         }
 
+        # Pick only the single best-priced Ontario book per (outcome, point) instead of
+        # alerting on every book that clears the EV threshold -- otherwise the same bet
+        # showing value at multiple books each sends its own alert with a slightly
+        # different EV%, which reads as duplicate notifications for one decision. The best
+        # price is also strictly the right recommendation anyway, so this loses nothing.
+        best_by_outcome: dict[tuple[str, float | None], tuple[str, float, str | None]] = {}
         for book_bm in ontario_bms:
             book_market = find_market(book_bm, market_key)
             if not book_market:
                 continue
             for name, point, price, link in extract_outcomes(book_market, book_bm):
                 link = link or settings.homepage_url(book_bm["key"])
-                true_prob = sharp_lookup.get((name, point))
-                if true_prob is None:
-                    continue  # line doesn't match the sharp book's current line -- skip
+                key = (name, point)
+                current = best_by_outcome.get(key)
+                if current is None or price > current[1]:
+                    best_by_outcome[key] = (book_bm["key"], price, link)
 
-                ev = ev_pct(true_prob, price)
-                if ev < settings.min_ev_pct:
-                    continue
+        for (name, point), (bookmaker_key, price, link) in best_by_outcome.items():
+            true_prob = sharp_lookup.get((name, point))
+            if true_prob is None:
+                continue  # line doesn't match the sharp book's current line -- skip
 
-                stake = stake_amount(
-                    true_prob=true_prob,
-                    decimal_odds=price,
-                    bankroll=bankroll,
-                    kelly_fraction=settings.kelly_fraction,
-                    max_stake_pct=settings.max_stake_pct,
-                    min_stake=settings.min_stake,
-                )
-                if stake <= 0:
-                    continue
+            ev = ev_pct(true_prob, price)
+            if ev < settings.min_ev_pct:
+                continue
 
-                alerts_sent += _upsert_and_maybe_notify(
-                    db=db,
-                    telegram=telegram,
-                    event=event,
-                    sport_key=sport_key,
-                    market_key=market_key,
-                    outcome_name=name,
-                    point=point,
-                    bookmaker_key=book_bm["key"],
-                    price=price,
-                    deep_link=link,
-                    true_prob=true_prob,
-                    ev=ev,
-                    stake=stake,
-                    commence_time=commence_time,
-                    hours_to_commence=hours_to_commence,
-                    now=now,
-                )
+            stake = stake_amount(
+                true_prob=true_prob,
+                decimal_odds=price,
+                bankroll=bankroll,
+                kelly_fraction=settings.kelly_fraction,
+                max_stake_pct=settings.max_stake_pct,
+                min_stake=settings.min_stake,
+            )
+            if stake <= 0:
+                continue
+
+            alerts_sent += _upsert_and_maybe_notify(
+                db=db,
+                telegram=telegram,
+                event=event,
+                sport_key=sport_key,
+                market_key=market_key,
+                outcome_name=name,
+                point=point,
+                bookmaker_key=bookmaker_key,
+                price=price,
+                deep_link=link,
+                true_prob=true_prob,
+                ev=ev,
+                stake=stake,
+                commence_time=commence_time,
+                hours_to_commence=hours_to_commence,
+                now=now,
+            )
     return alerts_sent
 
 
@@ -236,7 +248,7 @@ def _send_alert_message(telegram: TelegramClient, alert: Alert) -> None:
     book = settings.display_name(alert.bookmaker_key)
 
     lines = [
-        f"*+{alert.ev_pct:.1f}% EV* · {label}: {alert.outcome_display()} @ {alert.book_odds:.2f} ({book})",
+        f"*+{alert.ev_pct:.1f}% EV* · {label}: {alert.outcome_display()} @ {alert.book_odds_display()} ({book})",
         f"{alert.away_team} @ {alert.home_team} · {_local_time_str(alert.commence_time)} · "
         f"${alert.recommended_stake:,.2f}",
     ]

@@ -95,7 +95,7 @@ def test_placed_defaults_to_recommended_stake_and_shows_point():
     reply = commands._dispatch(db, settings, f"/placed {alert_id}")
 
     assert reply == (
-        f"Logged bet #{alert_id}: Toronto Maple Leafs -1.5 @ 2.05 (Bet99) for $40.00"
+        f"Logged bet #{alert_id}: Toronto Maple Leafs -1.5 @ +105 (Bet99) for $40.00"
     )
     with db.session() as s:
         alert = s.get(Alert, alert_id)
@@ -232,7 +232,7 @@ def test_status_lists_open_bets_with_point():
     assert reply == (
         "*Open bets:*\n"
         f"#{alert_id} Montreal Canadiens @ Toronto Maple Leafs — Toronto Maple Leafs -1.5 "
-        "@ 2.05 (Bet99) $40.00"
+        "@ +105 (Bet99) $40.00"
     )
 
 

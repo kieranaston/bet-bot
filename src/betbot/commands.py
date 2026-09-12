@@ -102,7 +102,7 @@ def _cmd_placed(db: Database, settings: Settings, args: list[str]) -> str:
         alert.status = "placed"
         alert.placed_stake = stake
         return (
-            f"Logged bet #{alert_id}: {alert.outcome_display()} @ {alert.book_odds} "
+            f"Logged bet #{alert_id}: {alert.outcome_display()} @ {alert.book_odds_display()} "
             f"({settings.display_name(alert.bookmaker_key)}) for ${stake:,.2f}"
         )
 
@@ -156,7 +156,7 @@ def _cmd_status(db: Database, settings: Settings) -> str:
         for a in open_bets:
             lines.append(
                 f"#{a.id} {a.away_team} @ {a.home_team} — {a.outcome_display()} "
-                f"@ {a.book_odds} ({settings.display_name(a.bookmaker_key)}) "
+                f"@ {a.book_odds_display()} ({settings.display_name(a.bookmaker_key)}) "
                 f"${a.placed_stake:,.2f}"
             )
         return "\n".join(lines)
