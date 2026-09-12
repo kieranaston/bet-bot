@@ -52,6 +52,15 @@ def test_get_odds_raises_on_error_status(mock_get):
 
 
 @patch("betbot.odds_client.requests.get")
+def test_list_sports_hits_free_endpoint(mock_get):
+    mock_get.return_value = _fake_response([{"key": "americanfootball_nfl", "active": True}])
+    CLIENT.list_sports()
+    args, kwargs = mock_get.call_args
+    assert args[0].endswith("/sports")
+    assert "all" not in kwargs["params"]
+
+
+@patch("betbot.odds_client.requests.get")
 def test_get_events_costs_nothing_and_passes_time_window(mock_get):
     mock_get.return_value = _fake_response([])
     import datetime as dt
@@ -71,3 +80,26 @@ def test_get_scores_sets_days_from(mock_get):
     CLIENT.get_scores("icehockey_nhl", days_from=2)
     _, kwargs = mock_get.call_args
     assert kwargs["params"]["daysFrom"] == 2
+
+
+@patch("betbot.odds_client.time.sleep")
+@patch("betbot.odds_client.requests.get")
+def test_get_retries_on_429_then_succeeds(mock_get, mock_sleep):
+    mock_get.side_effect = [
+        _fake_response({"message": "rate limited"}, status=429),
+        _fake_response([]),
+    ]
+    result = CLIENT.get_scores("icehockey_nhl")
+    assert result == []
+    assert mock_get.call_count == 2
+    mock_sleep.assert_called_once()
+
+
+@patch("betbot.odds_client.time.sleep")
+@patch("betbot.odds_client.requests.get")
+def test_get_raises_after_exhausting_429_retries(mock_get, mock_sleep):
+    mock_get.return_value = _fake_response({"message": "rate limited"}, status=429)
+    with pytest.raises(OddsApiError):
+        CLIENT.get_scores("icehockey_nhl")
+    assert mock_get.call_count == 3  # initial attempt + RATE_LIMIT_RETRIES
+    assert mock_sleep.call_count == 2

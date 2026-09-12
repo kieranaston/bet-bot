@@ -19,12 +19,18 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+# Docs (api-docs/docs_markdown/liveapi_guides_v4_api-error-codes.html.md, EXCEEDED_FREQ_LIMIT):
+# on a 429, "consider retrying the request after a couple of seconds."
+RATE_LIMIT_RETRIES = 2
+RATE_LIMIT_BACKOFF_SECONDS = 2.0
 
 
 class OddsApiError(RuntimeError):
@@ -43,20 +49,42 @@ class OddsApiClient:
 
     def _get(self, path: str, params: dict[str, Any], log_label: str) -> Any:
         url = f"{self.base_url}{path}"
-        resp = requests.get(url, params=params, timeout=30)
-        remaining = resp.headers.get("x-requests-remaining")
-        used = resp.headers.get("x-requests-used")
-        last = resp.headers.get("x-requests-last")
-        if remaining is not None:
-            logger.info(
-                "Odds API usage for %s: used=%s remaining=%s cost_of_this_call=%s",
-                log_label, used, remaining, last,
-            )
-        if resp.status_code != 200:
-            raise OddsApiError(
-                f"The Odds API returned {resp.status_code} for {log_label}: {resp.text[:500]}"
-            )
-        return resp.json()
+        attempt = 0
+        while True:
+            resp = requests.get(url, params=params, timeout=30)
+            remaining = resp.headers.get("x-requests-remaining")
+            used = resp.headers.get("x-requests-used")
+            last = resp.headers.get("x-requests-last")
+            if remaining is not None:
+                logger.info(
+                    "Odds API usage for %s: used=%s remaining=%s cost_of_this_call=%s",
+                    log_label, used, remaining, last,
+                )
+            if resp.status_code == 429 and attempt < RATE_LIMIT_RETRIES:
+                attempt += 1
+                wait = RATE_LIMIT_BACKOFF_SECONDS * attempt
+                logger.warning(
+                    "Odds API rate-limited for %s (attempt %d/%d) -- retrying in %.0fs",
+                    log_label, attempt, RATE_LIMIT_RETRIES, wait,
+                )
+                time.sleep(wait)
+                continue
+            if resp.status_code != 200:
+                raise OddsApiError(
+                    f"The Odds API returned {resp.status_code} for {log_label}: {resp.text[:500]}"
+                )
+            return resp.json()
+
+    def list_sports(self, all_sports: bool = False) -> list[dict[str, Any]]:
+        """Free -- no quota cost. Returns every currently valid sport key (in-season only,
+        unless all_sports=True), each with a "key", "title", and "active" flag. Use this to
+        confirm a sport key is real and in-season before adding it to config/settings.yaml
+        -- e.g. tennis has historically used per-tournament keys rather than one persistent
+        key, so check here rather than guessing."""
+        params: dict[str, Any] = {"apiKey": self.api_key}
+        if all_sports:
+            params["all"] = "true"
+        return self._get("/sports", params, "sports list (free)")
 
     def get_events(
         self,
