@@ -121,6 +121,10 @@ class Settings:
         return float(self._raw["scheduling"]["max_hours_ahead"])
 
     @property
+    def daily_report_time_local(self) -> str:
+        return str(self._raw["reporting"]["time_local"])
+
+    @property
     def settlement_enabled(self) -> bool:
         return bool(self._raw["settlement"]["enabled"])
 

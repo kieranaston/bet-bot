@@ -2,11 +2,15 @@ name: Scan for +EV bets
 
 on:
   schedule:
-    # Ticks every 10 minutes, but this costs nothing by itself (GitHub Actions minutes are
-    # free/cheap for a personal repo, not Odds API credits). betbot.main only actually calls
-    # the Odds API when the real Eastern clock time (DST-aware) falls within a scan window
-    # -- see config/settings.yaml `scheduling.scan_times_local` (currently 11am/5pm/11pm ET).
-    # Telegram command handling (/placed, /skip, /settle, etc.) still runs every tick.
+    # Ticks every 10 minutes so Telegram command handling (/placed, /skip, /settle, etc.)
+    # stays responsive; betbot.main only actually calls the Odds API when the real Eastern
+    # clock time (DST-aware) falls within a scan window -- see config/settings.yaml
+    # `scheduling.scan_times_local` (currently 8x/day, evenly every 3 hours). NOTE: this repo
+    # is private, so these ~144 runs/day do count against GitHub Actions' included minutes
+    # (2,000-3,000/month depending on plan) -- each run is short, but at ~1 billed minute
+    # each that's still ~4,300 min/month from this workflow alone. Worth checking your
+    # Actions usage (repo Settings -> Billing, or account billing settings) if you're near
+    # the free tier, since exceeding it either costs money or GitHub Actions pauses.
     - cron: "*/10 * * * *"
   workflow_dispatch: {}
 
@@ -34,4 +38,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Manual "Run workflow" dispatches bypass the scan-time window so a manual trigger
+          # actually does something regardless of time of day; scheduled ticks still respect it.
+          FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
         run: python -m betbot.main

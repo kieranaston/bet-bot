@@ -2,8 +2,21 @@ name: Daily bankroll/performance report
 
 on:
   schedule:
-    - cron: "0 13 * * *"  # 9am ET / 8am CT -- adjust to taste (UTC time)
+    # Two fixed UTC times, not a 10-minute tick like scan.yml -- unlike scan.yml, this
+    # workflow does no Telegram polling, so there's no reason to run it 144x/day just to
+    # check a time gate (that would cost ~4,320 GitHub Actions minutes/month on its own,
+    # which exceeds the free private-repo allowance on its own). 13:00 UTC = 9am ET during
+    # EDT (summer), 14:00 UTC = 9am ET during EST (winter); scripts/report.py's DST-aware
+    # is_scan_time check (against config/settings.yaml `reporting.time_local`) makes exactly
+    # one of these two actually send the report each day, so this stays correct across DST
+    # changes at ~2 runs/day instead of ~144.
+    - cron: "0 13 * * *"
+    - cron: "0 14 * * *"
   workflow_dispatch: {}
+
+concurrency:
+  group: betbot-daily-report
+  cancel-in-progress: false
 
 jobs:
   report:
@@ -25,4 +38,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Manual "Run workflow" dispatches bypass the time window so a manual trigger
+          # actually sends a report regardless of time of day; scheduled ticks still respect it.
+          FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
         run: python scripts/report.py

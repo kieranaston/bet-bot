@@ -8,20 +8,45 @@ tracks your bankroll and performance over time.
 ## How it works
 
 1. A GitHub Actions workflow (`.github/workflows/scan.yml`) ticks every 10 minutes, but
-   only actually calls the Odds API 3x/day, at 11am/5pm/11pm Eastern (configurable via
+   only actually calls the Odds API 8x/day, evenly every 3 hours (configurable via
    `config/settings.yaml` `scheduling.scan_times_local` — checked in real, DST-aware
    Eastern clock time via `betbot.scheduler.is_scan_time`, not a fixed UTC cron, so it
    stays correct across daylight saving changes). Telegram command handling (`/placed`,
-   `/skip`, `/settle`, etc.) still runs every 10-minute tick since it's free.
+   `/skip`, `/settle`, etc.) still runs every 10-minute tick since it's free. Scans are
+   spaced evenly around the clock rather than bursted around game days or US evening
+   hours — the portfolio spans enough sports that most days have something live, and
+   Pinnacle's soccer lines trade during European business hours (US overnight/early-morning
+   ET), so there's no clock window where the sharp reference is reliably idle.
 2. Per sport, it first hits the free `/events` endpoint to check whether anything's even
    upcoming, skipping the odds call entirely if not (an empty `/odds` response also costs
    0 credits per the docs, so this mainly saves a round-trip rather than credits). Otherwise
-   it pulls NFL/NBA/NHL/MLB odds (moneyline, spread, totals) from
+   it pulls odds for the sports/markets configured in `config/settings.yaml` `sports:` — NFL,
+   NBA, NHL, MLB, NCAAF get h2h/spreads/totals; CFL, MMA, and five soccer leagues (EPL,
+   La Liga, Bundesliga, Serie A, MLS) are restricted to h2h only — from
    [The Odds API](https://the-odds-api.com/) via `bookmakers=` — Pinnacle + your 6 Ontario
    books, 7 keys total. The Odds API's docs confirm "every group of 10 bookmakers is the
-   equivalent of 1 region," so our 7 books cost 1 region-equivalent instead of the 2
-   regions `regions=eu,ca` would need for the same data. At 4 sports × 3 markets ×
-   1 region-equivalent × 3 scans/day, that's ~1,080 credits/month.
+   equivalent of 1 region," so our 7 books cost 1 region-equivalent instead of the 2 regions
+   `regions=eu,ca` would need for the same data. That's roughly 5,300 credits/month at 8
+   scans/day (well within a 20,000/month plan) — sized to stay on markets/leagues where
+   Pinnacle is still a sharp, liquid reference, deliberately not extended to player props or
+   thin/niche leagues where "true odds" would be less trustworthy. The h2h-only restriction
+   on CFL/MMA/soccer follows the docs' own caveat that "spreads and totals markets are mainly
+   available for US sports and bookmakers" — since the plain `/odds` endpoint charges for
+   every *requested* market regardless of whether any bookmaker actually returns data for it,
+   requesting a market Pinnacle doesn't reliably price there is wasted spend, not just a
+   missed signal. Every sport/market above was live-verified (2026-09-12) to actually have
+   Pinnacle present; `basketball_ncaab` and `soccer_uefa_champs_league` were pulled from the
+   list after that check found zero upcoming events for either in the 7-day scan window (see
+   comments in `config/settings.yaml` for when/how to re-add and re-verify each). Use
+   `scripts/list_bookmakers.py <sport> --market spreads` to re-check Pinnacle coverage
+   yourself at any point. Soccer's h2h is a 3-way market (home/draw/away);
+   `betbot.ev`/`betbot.main`'s matching already generalizes to N-way markets, and
+   `betbot.settlement.grade_alert` handles a tied score as a loss (not a push) for a
+   home/away bet in 3-way sports. Run
+   `python -c "from betbot.config import Secrets, settings; from betbot.odds_client import OddsApiClient; c = OddsApiClient(Secrets.from_env().odds_api_key, settings.odds_api_base_url); print(c.list_sports())"`
+   (free, no quota cost) to confirm a sport's current key before adding another one —
+   tennis was left out here because the API has historically used per-tournament keys
+   rather than one persistent `tennis_atp`/`tennis_wta` key.
 3. For each market, it devigs Pinnacle's two-way price into a true win probability
    (`src/betbot/devig.py`), then checks every Ontario book's price against that true
    probability (`src/betbot/ev.py`). Anything at or above the EV threshold in
@@ -90,7 +115,7 @@ secret**. Add all four:
 - `DATABASE_URL`
 
 Once these are set, `.github/workflows/scan.yml` will start ticking automatically every
-10 minutes, actually scanning 3x/day (see "How it works" above; also triggerable manually
+10 minutes, actually scanning 8x/day (see "How it works" above; also triggerable manually
 from the Actions tab via "Run workflow"). **Both scheduled workflows are currently
 disabled** (`gh workflow list --all` to check) — re-enable with
 `gh workflow enable scan.yml` and `gh workflow enable daily_report.yml` when ready.
@@ -104,6 +129,16 @@ below) to confirm the exact live key first:
 
 ```bash
 python scripts/list_bookmakers.py americanfootball_nfl
+```
+
+The same script also doubles as a Pinnacle-coverage check before trusting a market in
+`config/settings.yaml` — pass `--market spreads` or `--market totals` (defaults to `h2h`) to
+confirm `pinnacle` actually appears for that sport/market combo. This matters because the
+docs warn spreads/totals coverage is "mainly available for US sports and bookmakers" — several
+non-US leagues in `sports:` are deliberately restricted to `h2h` only until verified this way:
+
+```bash
+python scripts/list_bookmakers.py soccer_epl --market spreads
 ```
 
 This prints every bookmaker key The Odds API currently returns for that sport/region —
@@ -140,7 +175,7 @@ GitHub Actions — e.g. for tighter in-play scan intervals — nothing in the co
 ## Project layout
 
 ```
-config/settings.yaml     bankroll, Kelly fraction, EV threshold, sports/markets, cooldowns
+config/settings.yaml     bankroll, Kelly fraction, EV threshold, sports/markets, cooldowns, report time
 config/bookmakers.yaml    sharp book + Ontario book keys
 src/betbot/
   odds_client.py          The Odds API wrapper (/events, /odds, /scores)
@@ -159,7 +194,7 @@ scripts/
   init_db.py               creates tables / seeds bankroll
   report.py                daily digest sender
 .github/workflows/
-  scan.yml                 ticks every 10 min, actually scans 3x/day (see scan_times_local)
+  scan.yml                 ticks every 10 min, actually scans 8x/day (see scan_times_local)
   daily_report.yml         sends the daily digest
   tests.yml                runs pytest on push/PR
 ```
@@ -173,7 +208,7 @@ scripts/
   spreads/totals; if a book's line differs from Pinnacle's, that outcome is skipped rather
   than approximated.
 - Auto-settlement only checks games within `settlement.days_from` (2 days) of finishing,
-  and only runs during the 3x/day scan window — a bet can sit unsettled for a few hours
+  and only runs during the 8x/day scan window — a bet can sit unsettled for a few hours
   after its game ends before the next scan catches it. `/settle` still works manually if
   you don't want to wait.
 - Bookmaker homepage URLs in `config/bookmakers.yaml` (`homepage_urls`, used as the final

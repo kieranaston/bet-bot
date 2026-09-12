@@ -26,6 +26,49 @@ sports:
     markets: [h2h, spreads, totals]
   - key: baseball_mlb
     markets: [h2h, spreads, totals]
+  # Added to use more of a 20,000/month Odds API quota (previous 4 sports cost ~1,080/month)
+  # while staying on markets/leagues where Pinnacle is still a liquid, sharp reference --
+  # deliberately not extended to player props or thin/niche leagues (see chat -- Pinnacle's
+  # line quality degrades there, which would raise false-positive +EV alerts, not real ones).
+  #
+  # Market selection per sport follows the docs' own reliability caveat: "spreads and totals
+  # markets are mainly available for US sports and bookmakers at this time" (api-docs/
+  # docs_markdown/liveapi_guides_v4.md). Unlike the per-event odds endpoint, the plain /odds
+  # endpoint used for real scans charges for every REQUESTED market regardless of whether any
+  # bookmaker actually returns data for it -- so requesting a market Pinnacle doesn't reliably
+  # price there isn't just a missed signal, it's wasted spend every scan. NCAAF/NCAAB are
+  # unambiguously "US sports" per that caveat, so they keep the full h2h/spreads/totals set.
+  - key: americanfootball_ncaaf
+    markets: [h2h, spreads, totals]
+  # basketball_ncaab: removed 2026-09-12 -- live-verified via scripts/list_bookmakers.py-style
+  # check, 0 upcoming events in the 7-day scan window (season starts ~November). Re-add and
+  # re-verify Pinnacle coverage once the season starts.
+  - key: mma_mixed_martial_arts
+    markets: [h2h]
+  # CFL is American-football-shaped (same market structure as NFL) but is a Canadian league,
+  # not clearly a "US sport" per the caveat above -- restricted to h2h until spreads/totals
+  # coverage is verified live (see scripts/list_bookmakers.py --market spreads/totals).
+  - key: americanfootball_cfl
+    markets: [h2h]
+  # Soccer h2h is 3-way (home/draw/away) -- devig/EV/matching in betbot.ev and betbot.main
+  # already generalize to N-way markets, and betbot.settlement.grade_alert handles a tied
+  # score on a home/away bet as a loss (the Draw outcome won), not a push. Restricted to h2h
+  # only: Pinnacle's soccer reputation is specifically about h2h/Asian-handicap/totals on
+  # their own site, which doesn't guarantee this aggregator's spreads/totals normalization is
+  # reliable for non-US sports per the caveat above -- verify before re-adding those markets.
+  - key: soccer_epl
+    markets: [h2h]
+  # soccer_uefa_champs_league: removed 2026-09-12 -- 0 upcoming events in the 7-day scan
+  # window when live-checked. Unlike NCAAB this could just be a between-matchdays gap rather
+  # than true off-season -- worth re-checking within a few days rather than waiting months.
+  - key: soccer_spain_la_liga
+    markets: [h2h]
+  - key: soccer_germany_bundesliga
+    markets: [h2h]
+  - key: soccer_italy_serie_a
+    markets: [h2h]
+  - key: soccer_usa_mls
+    markets: [h2h]
 
 odds_api:
   # Confirmed cost formula (The Odds API docs, api-docs/docs_markdown/ crawled 2026-09-11):
@@ -40,18 +83,32 @@ odds_api:
   base_url: "https://api.the-odds-api.com/v4"
 
 scheduling:
-  # We only spend Odds API credits 3x/day, at these local times. Checked in real Eastern
-  # clock time (DST-aware via zoneinfo) -- .github/workflows/scan.yml's cron ticks every
-  # 10 minutes for free, but betbot.main only actually calls the Odds API when "now" falls
-  # within `scan_window_minutes` of one of these times. No manual DST edits needed.
+  # We spend Odds API credits 8x/day (every 3 hours), at these local times. Checked in real
+  # Eastern clock time (DST-aware via zoneinfo) -- .github/workflows/scan.yml's cron ticks
+  # every 10 minutes for free, but betbot.main only actually calls the Odds API when "now"
+  # falls within `scan_window_minutes` of one of these times. No manual DST edits needed.
+  #
+  # Deliberately even round-the-clock spacing, not day-of-week or overnight-skipping bursts:
+  # (1) the portfolio now spans NFL/NBA/NHL/MLB/NCAAF/CFL/MMA plus 5 soccer leagues, so
+  #     almost every day has something live -- day-level bursting mostly stopped applying
+  #     once coverage got this broad; (2) the obvious "skip the ET overnight hours" idea is
+  #     wrong here specifically because Pinnacle's soccer lines trade during European
+  #     business hours, which fall in the US overnight/early-morning ET window -- cutting
+  #     that window would cut exactly when a chunk of our sharp reference is most active.
+  # At ~22 credits/scan (12 sports' markets x 1 region-equivalent) x 8 scans/day, that's
+  # ~5,280 credits/month -- ~26% of a 20,000/month plan.
   timezone: "America/Toronto"
-  scan_times_local: ["11:00", "17:00", "23:00"]
+  scan_times_local: ["00:00", "03:00", "06:00", "09:00", "12:00", "15:00", "18:00", "21:00"]
   scan_window_minutes: 10
 
   # Adaptive re-alert cooldown tiers, keyed by hours-to-commence -> minimum minutes between
-  # re-alerting the *same* (event, market, bookmaker, outcome) unless the price moves.
-  # Since real scans only happen ~every 6 hours (see scan_times_local above), these are
-  # tuned so a still-open, unchanged opportunity doesn't get re-pinged on every single scan.
+  # re-alerting the *same* (event, market, bookmaker, outcome) unless the price moves. These
+  # values are real-elapsed-time throttles and don't need retuning for the 3-hour scan gap
+  # above: at the old 6-hour gap, the <=6h/<=24h tiers were mostly moot (cooldown < gap, so
+  # they always re-alerted regardless of the tier value -- only the >24h tier did anything).
+  # The tighter 3-hour gap lets the <=24h/>24h tiers finally throttle as designed (2x and 4x
+  # scan-skipping respectively), while near-game tiers now alert almost every scan -- which
+  # is the intended behavior: more frequent reminders as the decision deadline approaches.
   tiers:
     - max_hours_to_commence: 1
       cooldown_minutes: 60
@@ -65,10 +122,17 @@ scheduling:
   # and re-checking them wastes API credits.
   max_hours_ahead: 168   # 7 days
 
+reporting:
+  # Daily digest send time, checked the same DST-aware way as scheduling.scan_times_local
+  # (see betbot.scheduler.is_scan_time) so it doesn't drift an hour across DST changes the
+  # way a fixed UTC cron would. .github/workflows/daily_report.yml ticks every 10 minutes
+  # for free and only actually sends when local Eastern time falls in this window.
+  time_local: "09:00"
+
 settlement:
   # Auto-settle placed bets using The Odds API's /scores endpoint (flat 2 credits/request
   # with days_from set) instead of requiring a manual /settle for every bet. Runs inside
-  # the same 3x/day scan window, and only for sports with at least one placed-but-unsettled
+  # the same 8x/day scan window, and only for sports with at least one placed-but-unsettled
   # bet -- so it costs nothing on days with nothing to settle.
   enabled: true
   # How many past days of completed games to look back over (max 3, per Odds API limit).
