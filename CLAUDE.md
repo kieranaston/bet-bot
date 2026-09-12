@@ -29,18 +29,19 @@ There is no lint/format command configured (no ruff/black/flake8 in dependencies
 
 ## Architecture
 
-`src/betbot/main.py::run()` is the single entry point, invoked on every scheduler tick (every 10
-min via `.github/workflows/scan.yml`). It does two things unconditionally cheaply, then one thing
-only inside scan windows:
+`src/betbot/main.py::run()` is the single entry point, invoked on every scheduler tick
+(`.github/workflows/scan.yml`, twice hourly -- GitHub throttles `*/10` so badly that
+commands were sitting unanswered for hours). It does two things unconditionally cheaply,
+then one thing only inside scan windows:
 
 1. **Always**: poll Telegram `getUpdates` and dispatch `/placed`, `/skip`, `/settle`, `/bankroll`,
-   `/status` via `commands.py` — free, so this stays responsive even between real scans.
+ `/status` via `commands.py` — free, so this stays responsive even between real scans.
 2. **Gated by `scheduler.is_scan_time()`**: only proceed past this point during the 8x/day windows
-   (evenly every 3 hours, deliberately not bursted by game day or US evening hours — see the
-   comment above `scan_times_local` in `config/settings.yaml`) in `config/settings.yaml`
-   (`scheduling.scan_times_local`), checked in real DST-aware Eastern time via `zoneinfo` — not a
-   fixed UTC cron. This is the load-bearing cost control: it's what keeps Odds API usage at
-   ~8 calls/day/sport instead of ~144 (one per 10-min tick).
+ (evenly every 3 hours, deliberately not bursted by game day or US evening hours — see the
+ comment above `scan_times_local` in `config/settings.yaml`) in `config/settings.yaml`
+ (`scheduling.scan_times_local`), checked in real DST-aware Eastern time via `zoneinfo` — not a
+ fixed UTC cron. This is the load-bearing cost control: it's what keeps Odds API usage at
+ ~8 calls/day/sport instead of one per tick.
 3. Inside a scan window: auto-settle any `/placed` bets whose games finished (`settlement.py`, via
    `/scores`), then scan each configured sport (`config/settings.yaml` `sports:`) for +EV lines.
 

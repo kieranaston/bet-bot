@@ -7,12 +7,12 @@ tracks your bankroll and performance over time.
 
 ## How it works
 
-1. A GitHub Actions workflow (`.github/workflows/scan.yml`) ticks every 10 minutes, but
+1. A GitHub Actions workflow (`.github/workflows/scan.yml`) ticks twice an hour, but
    only actually calls the Odds API 8x/day, evenly every 3 hours (configurable via
    `config/settings.yaml` `scheduling.scan_times_local` — checked in real, DST-aware
    Eastern clock time via `betbot.scheduler.is_scan_time`, not a fixed UTC cron, so it
    stays correct across daylight saving changes). Telegram command handling (`/placed`,
-   `/skip`, `/settle`, etc.) still runs every 10-minute tick since it's free. Scans are
+   `/skip`, `/settle`, etc.) still runs on every tick since it's free. Scans are
    spaced evenly around the clock rather than bursted around game days or US evening
    hours — the portfolio spans enough sports that most days have something live, and
    Pinnacle's soccer lines trade during European business hours (US overnight/early-morning
@@ -121,8 +121,8 @@ secret**. Add all four:
 - `TELEGRAM_CHAT_ID`
 - `DATABASE_URL`
 
-Once these are set, `.github/workflows/scan.yml` will start ticking automatically every
-10 minutes, actually scanning 8x/day (see "How it works" above; also triggerable manually
+Once these are set, `.github/workflows/scan.yml` will start ticking automatically twice
+an hour, actually scanning 8x/day (see "How it works" above; also triggerable manually
 from the Actions tab via "Run workflow"). **Both scheduled workflows are currently
 disabled** (`gh workflow list --all` to check) — re-enable with
 `gh workflow enable scan.yml` and `gh workflow enable daily_report.yml` when ready.
@@ -201,7 +201,7 @@ scripts/
   init_db.py               creates tables / seeds bankroll
   report.py                daily digest sender
 .github/workflows/
-  scan.yml                 ticks every 10 min, actually scans 8x/day (see scan_times_local)
+  scan.yml                 ticks twice hourly, actually scans 8x/day (see scan_times_local)
   daily_report.yml         sends the daily digest
   tests.yml                runs pytest on push/PR
 ```

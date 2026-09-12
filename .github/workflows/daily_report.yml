@@ -2,14 +2,12 @@ name: Daily bankroll/performance report
 
 on:
   schedule:
-    # Two fixed UTC times, not a 10-minute tick like scan.yml -- unlike scan.yml, this
-    # workflow does no Telegram polling, so there's no reason to run it 144x/day just to
-    # check a time gate (that would cost ~4,320 GitHub Actions minutes/month on its own,
-    # which exceeds the free private-repo allowance on its own). 13:00 UTC = 9am ET during
-    # EDT (summer), 14:00 UTC = 9am ET during EST (winter); scripts/report.py's DST-aware
-    # is_scan_time check (against config/settings.yaml `reporting.time_local`) makes exactly
-    # one of these two actually send the report each day, so this stays correct across DST
-    # changes at ~2 runs/day instead of ~144.
+    # Two fixed UTC times -- unlike scan.yml this workflow does no Telegram polling, so
+    # there's no reason to run it on scan.yml's twice-hourly cadence just to check a time
+    # gate. 13:00 UTC = 9am ET during EDT (summer), 14:00 UTC = 9am ET during EST (winter);
+    # scripts/report.py's DST-aware is_scan_time check (against config/settings.yaml
+    # `reporting.time_local`) makes exactly one of these two actually send the report each
+    # day, so this stays correct across DST changes.
     - cron: "0 13 * * *"
     - cron: "0 14 * * *"
   workflow_dispatch: {}

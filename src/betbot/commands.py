@@ -22,17 +22,20 @@ logger = logging.getLogger(__name__)
 
 HELP_TEXT = (
     "*Commands*\n"
-    "/placed <id> [stake] — mark a bet placed (defaults to recommended stake)\n"
-    "/skip <id> — dismiss an alert\n"
-    "/settle <id> win|loss|push [closing_odds] — grade a bet & update bankroll\n"
-    "/bankroll [amount] — show or set current bankroll\n"
-    "/status — list open (placed, unsettled) bets\n"
-    "/help — this message"
+    "`/placed <id> stake` — mark a bet placed (defaults to recommended stake)\n"
+    "`/skip <id>` — dismiss an alert\n"
+    "`/settle <id> win|loss|push closing_odds` — grade a bet & update bankroll\n"
+    "`/bankroll amount` — show or set current bankroll\n"
+    "`/status` — list open (placed, unsettled) bets\n"
+    "`/help` — this message"
 )
 
 
 def process_updates(
-    db: Database, settings: Settings, updates: list[dict]
+    db: Database,
+    settings: Settings,
+    updates: list[dict],
+    allowed_chat_id: str | None = None,
 ) -> list[str]:
     """Applies each update's command and returns the reply text(s) to send back, in order.
     Also advances the stored Telegram update offset so we never reprocess a command."""
@@ -40,9 +43,21 @@ def process_updates(
     last_update_id = None
     for update in updates:
         last_update_id = update["update_id"]
-        message = update.get("message") or update.get("channel_post")
+        message = (
+            update.get("message")
+            or update.get("edited_message")
+            or update.get("channel_post")
+        )
         if not message or "text" not in message:
             continue
+        if allowed_chat_id is not None:
+            chat_id = str((message.get("chat") or {}).get("id", ""))
+            if chat_id != str(allowed_chat_id):
+                logger.info(
+                    "Ignoring Telegram update %s from chat %s (expected %s)",
+                    last_update_id, chat_id, allowed_chat_id,
+                )
+                continue
         replies.append(_dispatch(db, settings, message["text"].strip()))
 
     if last_update_id is not None:
@@ -54,7 +69,8 @@ def _dispatch(db: Database, settings: Settings, text: str) -> str:
     parts = text.split()
     if not parts:
         return ""
-    cmd = parts[0].lower()
+    # Telegram clients (menu taps, groups) send `/help@BotName` -- match the verb only.
+    cmd = parts[0].lower().split("@", 1)[0]
     args = parts[1:]
 
     try:

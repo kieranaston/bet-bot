@@ -266,13 +266,16 @@ def run() -> None:
     telegram = TelegramClient(secrets.telegram_bot_token, secrets.telegram_chat_id)
 
     # 1. Apply any Telegram commands the user sent since the last run. This runs on every
-    # tick (cron fires every 10 min) regardless of scan windows -- it's free (no Odds API
-    # calls), and keeps /placed, /skip, /settle etc. responsive rather than waiting hours
-    # for the next real scan.
+    # tick regardless of scan windows -- it's free (no Odds API calls), and keeps /placed,
+    # /skip, /settle etc. responsive rather than waiting hours for the next real scan.
     offset_raw = db.get_kv("telegram_update_offset")
     offset = int(offset_raw) if offset_raw else None
     updates = telegram.get_updates(offset)
-    for reply in commands.process_updates(db, settings, updates):
+    replies = commands.process_updates(
+        db, settings, updates, allowed_chat_id=secrets.telegram_chat_id.strip()
+    )
+    logger.info("Telegram: fetched %d update(s), sending %d reply(ies).", len(updates), len(replies))
+    for reply in replies:
         telegram.send_message(reply)
 
     # 2. Only spend Odds API credits during the configured scan windows (see

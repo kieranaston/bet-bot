@@ -1,9 +1,10 @@
 """Scan-time gating and adaptive re-alert cooldown.
 
-The GitHub Actions cron in .github/workflows/scan.yml ticks every 10 minutes for free, but
-we only want to actually spend Odds API credits a few times a day. `is_scan_time` decides
-that using real Eastern clock time (DST-aware, via zoneinfo) so the schedule stays correct
-across the November/March clock changes without anyone having to edit a cron expression.
+The GitHub Actions cron in .github/workflows/scan.yml ticks a couple of times an hour so
+Telegram commands stay responsive, but we only want to actually spend Odds API credits a
+few times a day. `is_scan_time` decides that using real Eastern clock time (DST-aware, via
+zoneinfo) so the schedule stays correct across the November/March clock changes without
+anyone having to edit a cron expression.
 
 `should_alert` is a separate concern: once we *do* scan, this controls how often we'll
 re-notify about the same still-open opportunity between scans -- tighter cooldowns for

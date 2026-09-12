@@ -49,6 +49,13 @@ def test_help_and_start_return_help_text():
     assert commands._dispatch(db, settings, "/start") == commands.HELP_TEXT
 
 
+def test_command_with_bot_mention_suffix_is_recognized():
+    db = _db()
+    settings = _fake_settings()
+    assert commands._dispatch(db, settings, "/help@MyBetBot") == commands.HELP_TEXT
+    assert commands._dispatch(db, settings, "/bankroll@MyBetBot") == "Current bankroll: $1,000.00"
+
+
 def test_unrecognized_command_is_ignored_silently():
     db = _db()
     settings = _fake_settings()
@@ -278,3 +285,27 @@ def test_process_updates_falls_back_to_channel_post():
     replies = commands.process_updates(db, settings, updates)
 
     assert replies == [commands.HELP_TEXT]
+
+
+def test_process_updates_handles_edited_message():
+    db = _db()
+    settings = _fake_settings()
+    updates = [{"update_id": 1, "edited_message": {"text": "/help"}}]
+
+    replies = commands.process_updates(db, settings, updates)
+
+    assert replies == [commands.HELP_TEXT]
+
+
+def test_process_updates_ignores_other_chats_but_still_advances_offset():
+    db = _db()
+    settings = _fake_settings()
+    updates = [
+        {"update_id": 4, "message": {"text": "/help", "chat": {"id": 999}}},
+        {"update_id": 5, "message": {"text": "/help", "chat": {"id": 123}}},
+    ]
+
+    replies = commands.process_updates(db, settings, updates, allowed_chat_id="123")
+
+    assert replies == [commands.HELP_TEXT]
+    assert db.get_kv("telegram_update_offset") == "6"
