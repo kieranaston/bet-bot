@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import os
 from zoneinfo import ZoneInfo
 
 from betbot import commands, settlement
@@ -220,14 +221,6 @@ def _upsert_and_maybe_notify(
         return 1
 
 
-def _outcome_display(alert: Alert) -> str:
-    if alert.market == "spreads" and alert.point is not None:
-        return f"{alert.outcome_name} {alert.point:+g}"
-    if alert.market == "totals" and alert.point is not None:
-        return f"{alert.outcome_name} {alert.point:g}"
-    return alert.outcome_name
-
-
 def _local_time_str(commence_time: dt.datetime) -> str:
     local = commence_time.astimezone(ZoneInfo(settings.timezone))
     hour12 = local.hour % 12 or 12
@@ -236,13 +229,16 @@ def _local_time_str(commence_time: dt.datetime) -> str:
 
 
 def _send_alert_message(telegram: TelegramClient, alert: Alert) -> None:
+    """Bare-minimum alert: what to bet, at what odds/book, for how much, and the two
+    commands to act on it -- true_prob is dropped since it's a diagnostic backing number,
+    not something needed to decide whether to place the bet."""
     label = MARKET_LABELS.get(alert.market, alert.market)
     book = settings.display_name(alert.bookmaker_key)
 
     lines = [
-        f"*+{alert.ev_pct:.1f}% EV* · {label}: {_outcome_display(alert)} @ {alert.book_odds:.2f} ({book})",
-        f"{alert.away_team} @ {alert.home_team} · {_local_time_str(alert.commence_time)}",
-        f"Stake ${alert.recommended_stake:,.2f} · true {alert.true_prob * 100:.0f}%",
+        f"*+{alert.ev_pct:.1f}% EV* · {label}: {alert.outcome_display()} @ {alert.book_odds:.2f} ({book})",
+        f"{alert.away_team} @ {alert.home_team} · {_local_time_str(alert.commence_time)} · "
+        f"${alert.recommended_stake:,.2f}",
     ]
     if alert.deep_link:
         lines.append(f"[Bet now]({alert.deep_link})")
@@ -268,7 +264,8 @@ def run() -> None:
     # 2. Only spend Odds API credits during the configured scan windows (see
     # config/settings.yaml `scheduling.scan_times_local`).
     now = dt.datetime.now(dt.timezone.utc)
-    if not is_scan_time(
+    force_run = os.environ.get("FORCE_RUN") == "true"
+    if not force_run and not is_scan_time(
         now, settings.scan_times_local, settings.timezone, settings.scan_window_minutes
     ):
         logger.info("Outside scheduled scan window -- skipping odds fetch.")

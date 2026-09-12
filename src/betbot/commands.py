@@ -86,7 +86,7 @@ def _cmd_bankroll(db: Database, settings: Settings, args: list[str]) -> str:
     return f"Current bankroll: ${current:,.2f}"
 
 
-def _get_alert(db, session, alert_id: int) -> Alert | None:
+def _get_alert(session, alert_id: int) -> Alert | None:
     return session.get(Alert, alert_id)
 
 
@@ -95,14 +95,14 @@ def _cmd_placed(db: Database, settings: Settings, args: list[str]) -> str:
         return "Usage: /placed <alert_id> [stake]"
     alert_id = int(args[0])
     with db.session() as s:
-        alert = _get_alert(db, s, alert_id)
+        alert = _get_alert(s, alert_id)
         if not alert:
             return f"No alert #{alert_id} found."
         stake = float(args[1]) if len(args) > 1 else alert.recommended_stake
         alert.status = "placed"
         alert.placed_stake = stake
         return (
-            f"Logged bet #{alert_id}: {alert.outcome_name} @ {alert.book_odds} "
+            f"Logged bet #{alert_id}: {alert.outcome_display()} @ {alert.book_odds} "
             f"({settings.display_name(alert.bookmaker_key)}) for ${stake:,.2f}"
         )
 
@@ -112,7 +112,7 @@ def _cmd_skip(db: Database, args: list[str]) -> str:
         return "Usage: /skip <alert_id>"
     alert_id = int(args[0])
     with db.session() as s:
-        alert = _get_alert(db, s, alert_id)
+        alert = _get_alert(s, alert_id)
         if not alert:
             return f"No alert #{alert_id} found."
         alert.status = "skipped"
@@ -127,7 +127,7 @@ def _cmd_settle(db: Database, settings: Settings, args: list[str]) -> str:
     closing_odds = float(args[2]) if len(args) > 2 else None
 
     with db.session() as s:
-        alert = _get_alert(db, s, alert_id)
+        alert = _get_alert(s, alert_id)
         if not alert:
             return f"No alert #{alert_id} found."
         if not alert.placed_stake:
@@ -155,7 +155,7 @@ def _cmd_status(db: Database, settings: Settings) -> str:
         lines = ["*Open bets:*"]
         for a in open_bets:
             lines.append(
-                f"#{a.id} {a.away_team} @ {a.home_team} — {a.outcome_name} "
+                f"#{a.id} {a.away_team} @ {a.home_team} — {a.outcome_display()} "
                 f"@ {a.book_odds} ({settings.display_name(a.bookmaker_key)}) "
                 f"${a.placed_stake:,.2f}"
             )

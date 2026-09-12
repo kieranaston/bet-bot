@@ -81,6 +81,15 @@ class Alert(Base):
     last_alerted_at = Column(DateTime(timezone=True), nullable=True)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
+    def outcome_display(self) -> str:
+        """Outcome name with the spread/total line attached, e.g. "Bills -3.5" or
+        "Over 224.5" -- bare outcome_name for h2h, where there's no line to show."""
+        if self.market == "spreads" and self.point is not None:
+            return f"{self.outcome_name} {self.point:+g}"
+        if self.market == "totals" and self.point is not None:
+            return f"{self.outcome_name} {self.point:g}"
+        return self.outcome_name
+
 
 class Database:
     def __init__(self, database_url: str) -> None:
