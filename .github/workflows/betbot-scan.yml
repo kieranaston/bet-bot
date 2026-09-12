@@ -12,8 +12,7 @@ on:
     #
     # Renamed from scan.yml -> betbot-scan.yml to force a fresh GitHub workflow ID / schedule
     # registration. GitHub's schedule registry sometimes needs a file change to re-index.
-    - cron: "8 * * * *"
-    - cron: "38 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
 concurrency:
