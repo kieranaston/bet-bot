@@ -87,3 +87,36 @@ def test_process_event_alerts_both_sides_of_a_market_independently():
     with db.session() as s:
         names = sorted(a.outcome_name for a in s.query(Alert).all())
         assert names == ["Away Team", "Home Team"]
+
+
+def test_process_event_filters_out_extreme_longshots():
+    """A huge-EV bet on a low true-probability longshot must be suppressed (high variance,
+    devig error grows at the tails); a normal-probability +EV bet in the same event still
+    alerts."""
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+
+    # Sharp implied probs already sum to 1.0: Home 0.8333 (favorite), Away 0.1667 (longshot,
+    # below the 0.25 min_true_prob floor).
+    sharp = _bookmaker(
+        "pinnacle", [{"name": "Home Team", "price": 1.20}, {"name": "Away Team", "price": 6.00}]
+    )
+    book = _bookmaker(
+        "bet99_ca_on",
+        [
+            {"name": "Home Team", "price": 1.30},  # true 0.8333 -> +EV, not a longshot
+            {"name": "Away Team", "price": 8.00},  # true 0.1667 -> huge +EV, but a longshot
+        ],
+    )
+    event = _event([sharp, book])
+
+    sent = process_event(
+        db, telegram, event, "americanfootball_nfl", ["h2h"],
+        bankroll=1000.0, now=dt.datetime.now(dt.timezone.utc),
+    )
+
+    assert sent == 1
+    with db.session() as s:
+        alerts = s.query(Alert).all()
+        assert len(alerts) == 1
+        assert alerts[0].outcome_name == "Home Team"

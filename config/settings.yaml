@@ -12,6 +12,12 @@ bankroll:
 
 ev:
   min_ev_pct: 2.0               # only alert when EV >= this percent
+  # Floor on the devigged true (fair) win probability -- EV% alone doesn't capture
+  # variance, and devig error is proportionally larger at the tails (a given probability
+  # miscalibration matters much more at 8% than at 40%), so extreme-longshot "+EV" bets are
+  # both higher-variance and less trustworthy than they look. 0.25 excludes anything with
+  # fair odds longer than about +300 American; doesn't affect favorites, only longshots.
+  min_true_prob: 0.25
   # Devig method for turning sharp two-way odds into "true" probabilities.
   # "multiplicative" (basic proportional devig) is the only one implemented in v1.
   devig_method: multiplicative

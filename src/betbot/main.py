@@ -115,6 +115,8 @@ def process_event(
             true_prob = sharp_lookup.get((name, point))
             if true_prob is None:
                 continue  # line doesn't match the sharp book's current line -- skip
+            if true_prob < settings.min_true_prob:
+                continue  # too much of a longshot -- high variance, devig error grows at the tails
 
             ev = ev_pct(true_prob, price)
             if ev < settings.min_ev_pct:

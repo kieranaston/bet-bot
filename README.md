@@ -49,11 +49,18 @@ tracks your bankroll and performance over time.
    rather than one persistent `tennis_atp`/`tennis_wta` key.
 3. For each market, it devigs Pinnacle's two-way price into a true win probability
    (`src/betbot/devig.py`), then checks every Ontario book's price against that true
-   probability (`src/betbot/ev.py`). Anything at or above the EV threshold in
-   `config/settings.yaml` (default 2%) gets sized with quarter-Kelly
-   (`src/betbot/kelly.py`) against your current bankroll and sent to you on Telegram,
-   including a direct bet-slip link when the book provides one (`includeLinks=true`).
-4. It won't spam you: each (event, market, outcome, book) combination is only re-alerted
+   probability (`src/betbot/ev.py`). If more than one Ontario book clears the bar for the
+   same outcome, only the single best-priced one is used -- otherwise the same bet showing
+   value at multiple books would each send their own alert, which reads as duplicate
+   notifications for one decision. To actually alert, a bet needs both EV at or above the
+   threshold in `config/settings.yaml` (default 2%) *and* a true (fair) win probability at
+   or above `ev.min_true_prob` (default 25%, i.e. no longer than roughly +300 American) --
+   high-EV longshots are both higher-variance and less trustworthy, since devig error grows
+   proportionally larger at the tails. Whatever survives both filters gets sized with
+   quarter-Kelly (`src/betbot/kelly.py`) against your current bankroll and sent to you on
+   Telegram (odds shown in American format), including a direct bet-slip link when the book
+   provides one (`includeLinks=true`).
+4. It won't spam you: each (event, market, outcome, line) combination is only re-alerted
    after a cooldown that tightens as game time approaches, or immediately if the price
    moves (`src/betbot/scheduler.py`, tunable in `config/settings.yaml`).
 5. Before scanning for new opportunities, it also auto-settles any bet you've logged as
@@ -175,7 +182,7 @@ GitHub Actions — e.g. for tighter in-play scan intervals — nothing in the co
 ## Project layout
 
 ```
-config/settings.yaml     bankroll, Kelly fraction, EV threshold, sports/markets, cooldowns, report time
+config/settings.yaml     bankroll, Kelly fraction, EV threshold, longshot floor, sports/markets, cooldowns, report time
 config/bookmakers.yaml    sharp book + Ontario book keys
 src/betbot/
   odds_client.py          The Odds API wrapper (/events, /odds, /scores)

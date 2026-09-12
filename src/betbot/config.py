@@ -79,6 +79,10 @@ class Settings:
         return float(self._raw["ev"]["min_ev_pct"])
 
     @property
+    def min_true_prob(self) -> float:
+        return float(self._raw["ev"]["min_true_prob"])
+
+    @property
     def devig_method(self) -> str:
         return str(self._raw["ev"]["devig_method"])
 
