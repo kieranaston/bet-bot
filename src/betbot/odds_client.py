@@ -51,7 +51,14 @@ class OddsApiClient:
         url = f"{self.base_url}{path}"
         attempt = 0
         while True:
-            resp = requests.get(url, params=params, timeout=30)
+            try:
+                resp = requests.get(url, params=params, timeout=30)
+            except requests.exceptions.RequestException as exc:
+                # A transport-level failure (timeout, DNS, connection reset) raises here
+                # before any response exists, so there's no status code to check -- wrap it
+                # as OddsApiError so callers' existing `except OddsApiError: skip this sport`
+                # handling covers this too, instead of crashing the whole run.
+                raise OddsApiError(f"Network error calling {log_label}: {exc}") from exc
             remaining = resp.headers.get("x-requests-remaining")
             used = resp.headers.get("x-requests-used")
             last = resp.headers.get("x-requests-last")

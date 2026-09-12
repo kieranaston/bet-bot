@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from betbot.odds_client import OddsApiClient, OddsApiError
 
@@ -72,6 +73,16 @@ def test_get_events_costs_nothing_and_passes_time_window(mock_get):
     assert args[0].endswith("/sports/icehockey_nhl/events")
     assert kwargs["params"]["commenceTimeFrom"] == "2026-01-01T00:00:00Z"
     assert kwargs["params"]["commenceTimeTo"] == "2026-01-08T00:00:00Z"
+
+
+@patch("betbot.odds_client.requests.get")
+def test_network_failure_raises_odds_api_error_not_raw_requests_exception(mock_get):
+    """A transport-level failure (timeout, DNS, connection reset) must surface as
+    OddsApiError, the same as an HTTP error response -- callers only catch OddsApiError,
+    so anything else would crash the whole scan run instead of just skipping that sport."""
+    mock_get.side_effect = requests.exceptions.ConnectionError("connection reset")
+    with pytest.raises(OddsApiError):
+        CLIENT.get_scores("icehockey_nhl")
 
 
 @patch("betbot.odds_client.requests.get")
