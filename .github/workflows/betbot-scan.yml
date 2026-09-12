@@ -11,8 +11,7 @@ on:
     # Odds API when local Eastern time is in one of those windows.
     #
     # Renamed from scan.yml -> betbot-scan.yml to force a fresh GitHub workflow ID / schedule
-    # registration after cron edits left the old scheduler entry stuck (manual dispatch still
-    # worked; schedule events did not).
+    # registration. GitHub's schedule registry sometimes needs a file change to re-index.
     - cron: "8 * * * *"
     - cron: "38 * * * *"
   workflow_dispatch: {}
