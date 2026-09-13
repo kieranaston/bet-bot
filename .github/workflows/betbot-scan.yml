@@ -1,10 +1,23 @@
 name: Scan for +EV bets
 
 on:
-  schedule:
-    - cron: "8 * * * *"
-    - cron: "38 * * * *"
-  workflow_dispatch: {}
+  # GitHub's own `schedule:` trigger is unreliable for this repo at anything faster than a
+  # few-times-a-day cadence -- confirmed dropping ~98% of ticks at */10 and 100% of ticks at
+  # twice-hourly, on 2026-09-12, surviving a workflow rename/recreate and an API
+  # disable/re-enable. Firing is now driven externally: a free cron-job.org job calls the
+  # GitHub REST API's `workflow_dispatch` endpoint every 30 minutes instead. Don't re-add a
+  # `schedule:` block here without re-verifying it actually fires reliably first.
+  #
+  # Every cron-job.org tick is a normal, scan-window-gated run (force defaults false) so this
+  # still costs ~8 real Odds API scans/day, not one per tick -- see betbot.main's is_scan_time
+  # gate. Use the "force" checkbox in the Actions UI's "Run workflow" button to bypass the
+  # window for a manual one-off scan.
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Bypass scan-time gating and force a real scan"
+        type: boolean
+        default: false
 
 concurrency:
   group: betbot-scan
@@ -30,5 +43,5 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+          FORCE_RUN: ${{ github.event.inputs.force == 'true' && 'true' || 'false' }}
         run: python -m betbot.main
