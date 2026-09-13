@@ -5,19 +5,28 @@ Pinnacle's devigged "true" odds, and sends you a Telegram alert when it finds on
 reply to the bot (`/placed`, `/skip`, `/settle`) to log what you actually did, and it
 tracks your bankroll and performance over time.
 
+Runs continuously on a small always-on VPS (Docker + SQLite, $0/month on a free-tier VM) so
+Telegram commands get near-instant replies. GitHub Actions can run the same code as a
+disabled-by-default backup — see "Backup: running via GitHub Actions" below — but the VPS
+is the primary deployment.
+
 ## How it works
 
-1. A GitHub Actions workflow (`.github/workflows/betbot-scan.yml`) ticks twice an hour, but
-   only actually calls the Odds API 8x/day, evenly every 3 hours (configurable via
+1. A small Docker container runs `python -m betbot.main` in a loop (~every 20 seconds) on
+   the VPS. Each iteration polls Telegram for new commands (`/placed`, `/skip`, `/settle`,
+   `/scan`, etc.) — that's free, so this stays responsive between real scans — then checks
+   whether it's time to actually spend Odds API credits.
+2. Real scans only happen 8x/day, evenly every 3 hours, configurable via
    `config/settings.yaml` `scheduling.scan_times_local` — checked in real, DST-aware
-   Eastern clock time via `betbot.scheduler.is_scan_time`, not a fixed UTC cron, so it
-   stays correct across daylight saving changes). Telegram command handling (`/placed`,
-   `/skip`, `/settle`, etc.) still runs on every tick since it's free. Scans are
-   spaced evenly around the clock rather than bursted around game days or US evening
-   hours — the portfolio spans enough sports that most days have something live, and
+   Eastern clock time via `betbot.scheduler.is_scan_time`, not a fixed UTC cron, so it stays
+   correct across daylight saving changes. Since the poll loop ticks far more often than
+   that, `betbot.scheduler.current_scan_window_key` + a `last_scan_window` marker in the
+   database make sure each 3-hour window is only actually scanned once, not once per ~20s
+   poll. Scans are spaced evenly around the clock rather than bursted around game days or US
+   evening hours — the portfolio spans enough sports that most days have something live, and
    Pinnacle's soccer lines trade during European business hours (US overnight/early-morning
    ET), so there's no clock window where the sharp reference is reliably idle.
-2. Per sport, it first hits the free `/events` endpoint to check whether anything's even
+3. Per sport, it first hits the free `/events` endpoint to check whether anything's even
    upcoming, skipping the odds call entirely if not (an empty `/odds` response also costs
    0 credits per the docs, so this mainly saves a round-trip rather than credits). Otherwise
    it pulls odds for the sports/markets configured in `config/settings.yaml` `sports:` — NFL,
@@ -47,7 +56,7 @@ tracks your bankroll and performance over time.
    (free, no quota cost) to confirm a sport's current key before adding another one —
    tennis was left out here because the API has historically used per-tournament keys
    rather than one persistent `tennis_atp`/`tennis_wta` key.
-3. For each market, it devigs Pinnacle's two-way price into a true win probability
+4. For each market, it devigs Pinnacle's two-way price into a true win probability
    (`src/betbot/devig.py`), then checks every Ontario book's price against that true
    probability (`src/betbot/ev.py`). If more than one Ontario book clears the bar for the
    same outcome, only the single best-priced one is used -- otherwise the same bet showing
@@ -60,29 +69,31 @@ tracks your bankroll and performance over time.
    quarter-Kelly (`src/betbot/kelly.py`) against your current bankroll and sent to you on
    Telegram (odds shown in American format), including a direct bet-slip link when the book
    provides one (`includeLinks=true`).
-4. It won't spam you: each (event, market, outcome, line) combination is only re-alerted
+5. It won't spam you: each (event, market, outcome, line) combination is only re-alerted
    after a cooldown that tightens as game time approaches, or immediately if the price
    moves (`src/betbot/scheduler.py`, tunable in `config/settings.yaml`).
-5. Before scanning for new opportunities, it also auto-settles any bet you've logged as
+6. Whenever a real scan happens, it also first auto-settles any bet you've logged as
    `/placed` whose game has finished, using The Odds API's `/scores` endpoint (flat 2
    credits/request, only called for sports with something actually pending) —
    `src/betbot/settlement.py` grades moneyline/spread/total outcomes from the final score
-   and updates your bankroll automatically. You can still `/settle` manually if you want to
-   record the closing line for CLV, or if you'd rather not wait for the next scan window.
-6. You reply in Telegram:
+   and updates your bankroll automatically. You can still `/settle` manually any time if you
+   don't want to wait for the next scan window.
+7. Once a day, at `config/settings.yaml` `reporting.time_local`, it automatically sends a
+   digest to Telegram: bankroll, open bets, settled win/loss record, and ROI (same
+   once-per-window dedup pattern as the scan gating, via a `last_daily_report_window`
+   marker). `scripts/report.py` sends the same digest on demand if you want it sooner.
+8. You reply in Telegram:
    - `/placed <id> [stake]` — log that you bet it (defaults to the suggested stake)
    - `/skip <id>` — dismiss it
-   - `/settle <id> win|loss|push [closing_odds]` — grade it manually; updates your bankroll
-     and (if you pass the closing line) tracks closing-line value (CLV)
+   - `/settle <id> win|loss|push` — grade it manually; updates your bankroll
    - `/bankroll [amount]` — check or manually correct your bankroll
    - `/status` — list bets you've placed that aren't settled yet
-   - `/stats` — bankroll + settled performance (wins/losses/ROI)
+   - `/stats` — bankroll + settled performance (wins/losses/ROI), on demand
    - `/scan` — run a scan on demand instead of waiting for the next window (uses Odds API
      credits, same as an automatic scan; rate-limited to once every
      `commands.SCAN_COOLDOWN_MINUTES` (5 min) so a repeated tap can't blow through quota)
    - `/quota` — check Odds API usage (used/remaining/% of the current period used)
-7. A second workflow (`.github/workflows/daily_report.yml`) sends a daily digest:
-   bankroll, open bets, win/loss record, ROI, average CLV.
+   - `/help` — list all of the above
 
 ## First-time setup
 
@@ -96,48 +107,12 @@ Sign up at https://the-odds-api.com/ (the free tier is enough to start). Copy yo
 3. Visit `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` in a browser and find
    `"chat":{"id": ...}` in the JSON — that's your **chat ID**.
 
-### 3. Set up a persistent database (required for GitHub Actions)
-GitHub Actions runners are thrown away after every run, so bankroll/bet history can't
-live in a local SQLite file there. The free path:
-1. Create a free project at https://supabase.com/.
-2. Project Settings → Database → Connection string → **Session pooler** tab (not "URI" /
-   direct connection — Supabase's direct connection is IPv6-only on new projects, and
-   GitHub Actions runners have no IPv6 route, so it fails with "Network is unreachable").
-   Copy it (`postgresql://postgres.[project-ref]:[password]@aws-0-[region].pooler.supabase.com:5432/postgres`).
-3. That's your `DATABASE_URL`.
-
-(If you instead run this on a VPS or your own machine via cron — see "Alternative:
-running without GitHub Actions" below — you can skip this and just let it use the default
-local SQLite file at `data/betbot.db`.)
-
-**Already ran a scan before this update?** The `alerts` table needs one new column. In
-Supabase's SQL Editor, run:
-```sql
-ALTER TABLE alerts ADD COLUMN IF NOT EXISTS deep_link VARCHAR;
-```
-(A fresh install doesn't need this — `Database.__init__` creates the table with the new
-column already included.)
-
-### 4. Add secrets to the GitHub repo
-In the repo on GitHub: **Settings → Secrets and variables → Actions → New repository
-secret**. Add all four:
-- `ODDS_API_KEY`
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-- `DATABASE_URL`
-
-Once these are set, `.github/workflows/betbot-scan.yml` will start ticking automatically twice
-an hour, actually scanning 8x/day (see "How it works" above; also triggerable manually
-from the Actions tab via "Run workflow"). **Both scheduled workflows are currently
-disabled** (`gh workflow list --all` to check) — re-enable with
-`gh workflow enable betbot-scan.yml` and `gh workflow enable daily_report.yml` when ready.
-
-### 5. Verify your Ontario bookmaker keys
+### 3. Verify your Ontario bookmaker keys
 `config/bookmakers.yaml` is a deliberately closed allowlist — currently `bet99_ca_on`,
 `betano_ca_on`, `betmgm_ca_on`, `betrivers_ca_on`, `proline_ca_on`, `sportsinteraction_ca_on`.
 No suffix auto-matching: a book not in that list is never checked, even if The Odds API
 returns it under the `ca` region. If you want to add or remove a book, run locally (see
-below) to confirm the exact live key first:
+"Local development" below) to confirm the exact live key first:
 
 ```bash
 python scripts/list_bookmakers.py americanfootball_nfl
@@ -157,26 +132,60 @@ This prints every bookmaker key The Odds API currently returns for that sport/re
 use it to confirm a key before adding it to `config/bookmakers.yaml`, since keys
 occasionally change.
 
-### 6. Set your real starting bankroll
+### 4. Set your real starting bankroll
 Edit `bankroll.starting_amount` in `config/settings.yaml` before the first run (it only
 takes effect once, when the database is first created — after that, use the `/bankroll`
 Telegram command to adjust it).
 
-## Local development
+### 5. Deploy to a VPS
 
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env   # fill in your keys; DATABASE_URL can be left blank for local SQLite
-pytest -q              # run the unit tests (devig, EV, Kelly, scheduler logic)
-python -m betbot.main  # run one scan
-python scripts/report.py  # send a daily-digest-style message on demand
-```
+Any small VPS works. A free-tier VM (e.g. Google Cloud's `e2-micro`, always-free in
+`us-west1`/`us-central1`/`us-east1`) is enough for this — the bot is lightweight and only
+does real work 8x/day.
+
+1. Create an Ubuntu 24.04 VM and SSH into it.
+2. Install Docker and git:
+   ```bash
+   sudo apt update && sudo apt upgrade -y
+   sudo apt install -y docker.io git
+   sudo usermod -aG docker $USER
+   ```
+   Log out and back in (or open a fresh SSH session) for the group change to apply.
+3. Clone the repo and create `.env`:
+   ```bash
+   git clone <this-repo-url> bet-bot
+   cd bet-bot
+   cat > .env << 'EOF'
+   ODDS_API_KEY=your_key_here
+   TELEGRAM_BOT_TOKEN=your_token_here
+   TELEGRAM_CHAT_ID=your_chat_id_here
+   EOF
+   ```
+   Leave `DATABASE_URL` out entirely — it defaults to a local SQLite file at
+   `data/betbot.db`, which persists fine on a VPS's real disk (unlike a GitHub Actions
+   runner). No Postgres/Supabase needed for this path.
+4. Build and run it as a long-lived container:
+   ```bash
+   mkdir -p data && chmod 777 data
+   docker build -t bet-bot .
+   docker run -d --name bet-bot --restart unless-stopped --env-file .env -v $(pwd)/data:/app/data bet-bot
+   ```
+   `chmod 777 data` avoids a permissions mismatch between the container's non-root user and
+   the host directory when bind-mounting. `--restart unless-stopped` means the container
+   survives VM reboots and restarts automatically if it ever crashes.
+5. Confirm it's running:
+   ```bash
+   docker logs -f bet-bot
+   ```
+   You should see a Telegram poll log line roughly every 20 seconds. Try `/status` or
+   `/stats` in Telegram — it should reply within ~20 seconds.
+
+   Note: the VPS creates its own fresh `data/betbot.db` on first run — if you'd previously
+   tested locally or on a different machine, that data doesn't carry over automatically.
 
 ## Updating the running VPS deployment
 
-If the bot is running continuously on a VPS via Docker (rather than GitHub Actions), pushing
-to GitHub does **not** update it by itself — you need to redeploy manually:
+Pushing to GitHub does **not** update the VPS by itself — you need to redeploy manually:
 
 ```bash
 ssh <your-username>@<VM_EXTERNAL_IP>
@@ -195,20 +204,58 @@ docker logs -f bet-bot
 ```
 
 You should see a Telegram poll log line within ~20 seconds (`Ctrl+C` to stop watching the
-logs — this does not stop the container). `--restart unless-stopped` means the container
-survives VM reboots and restarts automatically if it ever crashes, so you only need to
-redeploy when the code itself changes.
+logs — this does not stop the container).
 
-## Alternative: running without GitHub Actions
+## Local development
 
-If you'd rather run this on an always-on box (VPS, home server, Raspberry Pi) instead of
-GitHub Actions — e.g. for tighter in-play scan intervals — nothing in the code changes:
-1. Leave `DATABASE_URL` unset to use the local SQLite file, or point it at Postgres if you
-   want to keep the same DB either way.
-2. Point cron (or `launchd`/systemd) at `python -m betbot.main` on whatever interval you
-   want, and at `python scripts/report.py` once a day.
-3. Delete/disable `.github/workflows/betbot-scan.yml` and `daily_report.yml` if you don't want
-   both running redundantly.
+For running tests and one-off manual checks — not how the bot is actually deployed:
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env   # fill in your keys; DATABASE_URL can be left blank for local SQLite
+pytest -q              # run the unit tests (devig, EV, Kelly, scheduler logic)
+python -m betbot.main  # run one iteration (Telegram poll + scan if in a window)
+python scripts/report.py  # send a daily-digest-style message on demand
+```
+
+## Backup: running via GitHub Actions
+
+`.github/workflows/betbot-scan.yml` and `daily_report.yml` can run the exact same code on
+GitHub's own schedulers instead of (or alongside) the VPS. **Both are currently disabled**
+(`gh workflow list --all` to check) — this repo found GitHub's native `schedule:` trigger
+unreliable at anything faster than a few-times-a-day cadence (it silently dropped ~98% of
+ticks at `*/10`, then 100% of ticks at twice-hourly — see git history on
+`betbot-scan.yml`), which is why the VPS is the primary path. `betbot-scan.yml` now only
+has a manual `workflow_dispatch` trigger (with a `force` checkbox to bypass scan-window
+gating), meant as an emergency fallback if the VPS goes down, not a schedule.
+
+To use this path instead of (or in addition to) the VPS:
+
+1. GitHub Actions runners are thrown away after every run, so bankroll/bet history can't
+   live in a local SQLite file there — you need a persistent hosted database:
+   1. Create a free project at https://supabase.com/.
+   2. Project Settings → Database → Connection string → **Session pooler** tab (not "URI" /
+      direct connection — Supabase's direct connection is IPv6-only on new projects, and
+      GitHub Actions runners have no IPv6 route, so it fails with "Network is unreachable").
+      Copy it (`postgresql://postgres.[project-ref]:[password]@aws-0-[region].pooler.supabase.com:5432/postgres`).
+   3. That's your `DATABASE_URL`.
+2. In the repo on GitHub: **Settings → Secrets and variables → Actions → New repository
+   secret**. Add all four: `ODDS_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`,
+   `DATABASE_URL`.
+3. Re-enable the workflow(s):
+   ```bash
+   gh workflow enable betbot-scan.yml
+   gh workflow enable daily_report.yml
+   ```
+4. If running this instead of the VPS, add back a `schedule:` block to
+   `betbot-scan.yml` at a cadence you've actually verified fires reliably (test with
+   `gh run list --workflow=betbot-scan.yml` before trusting it) — don't assume the old
+   twice-hourly cadence works, since that's exactly what didn't.
+
+**Note on the two databases:** if you run the VPS (local SQLite) and GitHub Actions
+(Supabase Postgres) at different times, they track separate bankroll/bet histories — the
+data doesn't automatically sync between them.
 
 ## Project layout
 
@@ -216,37 +263,43 @@ GitHub Actions — e.g. for tighter in-play scan intervals — nothing in the co
 config/settings.yaml     bankroll, Kelly fraction, EV threshold, longshot floor, sports/markets, cooldowns, report time
 config/bookmakers.yaml    sharp book + Ontario book keys
 src/betbot/
-  odds_client.py          The Odds API wrapper (/events, /odds, /scores)
+  odds_client.py          The Odds API wrapper (/events, /odds, /scores, /sports quota check)
   devig.py                vig removal -> true probabilities
   ev.py                   true prob vs. book price -> EV%
   kelly.py                quarter-Kelly stake sizing
-  scheduler.py            scan-window gating (DST-safe) + adaptive re-alert cooldown
+  scheduler.py            scan-window gating (DST-safe, dedup-safe) + adaptive re-alert cooldown
   settlement.py           win/loss/push grading + auto-settle via /scores
   storage.py              SQLAlchemy models (alerts, bankroll history, kv state)
   telegram.py             Telegram Bot API client (send + short-poll getUpdates)
-  commands.py             parses /placed, /skip, /settle, /bankroll, /status, /scan, /quota
-  performance.py          ROI / win-rate / CLV rollups
-  main.py                 orchestrates a single scan run
+  commands.py             parses /placed, /skip, /settle, /bankroll, /status, /stats, /scan, /quota
+  performance.py          ROI / win-rate rollups, shared report-line builder
+  main.py                 continuous-loop entry point: poll, gate, scan, settle, report
 scripts/
   list_bookmakers.py      discovery helper for real bookmaker keys
   init_db.py               creates tables / seeds bankroll
-  report.py                daily digest sender
+  report.py                manual on-demand daily-digest sender
 .github/workflows/
-  betbot-scan.yml          ticks twice hourly, actually scans 8x/day (see scan_times_local)
-  daily_report.yml         sends the daily digest
+  betbot-scan.yml          disabled by default; manual-dispatch-only backup (see "Backup" above)
+  daily_report.yml         disabled by default; manual-dispatch-only backup
   tests.yml                runs pytest on push/PR
+Dockerfile                 how the VPS runs the bot (continuous poll loop)
 ```
 
 ## Known limitations (v1)
 
 - Devig uses the basic multiplicative method, not Shin's method — fine for liquid
   two-way markets (moneyline/spread/totals), which is all this targets.
-- No player props (main markets only), per initial scope.
+- No player props (main markets only), per initial scope — also a poor cost/quality
+  trade-off: props require a per-event API call instead of one bulk call per sport, and
+  Pinnacle is less liquid/reliable there as a "true odds" reference.
+- No closing-line-value (CLV) tracking — considered and deliberately dropped, since it
+  would require either extra API calls to snapshot the closing line or manual entry, and
+  wasn't worth the added complexity for this use case.
 - Line matching between Pinnacle and the Ontario book requires an exact point match for
   spreads/totals; if a book's line differs from Pinnacle's, that outcome is skipped rather
   than approximated.
 - Auto-settlement only checks games within `settlement.days_from` (2 days) of finishing,
-  and only runs during the 8x/day scan window — a bet can sit unsettled for a few hours
+  and only runs alongside a real scan (8x/day) — a bet can sit unsettled for a few hours
   after its game ends before the next scan catches it. `/settle` still works manually if
   you don't want to wait.
 - Bookmaker homepage URLs in `config/bookmakers.yaml` (`homepage_urls`, used as the final
