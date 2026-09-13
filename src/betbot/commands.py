@@ -233,10 +233,7 @@ def _cmd_scan(
     alerts_sent = betbot_main.run_scan(db, settings, telegram, odds_client, bankroll, now)
     if alerts_sent:
         return f"Manual scan complete: {alerts_sent} alert(s) sent above."
-    return (
-        "Manual scan complete: no new +EV opportunities right now (this still respects "
-        "the usual re-alert cooldown, so a bet alerted on recently won't repeat here)."
-    )
+    return "Manual scan complete: no new +EV opportunities right now."
 
 
 def _cmd_quota(odds_client: OddsApiClient) -> str:

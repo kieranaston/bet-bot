@@ -375,6 +375,8 @@ def run() -> None:
     if not force_run:
         db.set_kv("last_scan_window", window_key)
     logger.info("Scan complete: %d new/updated alert(s) sent.", total_alerts)
+    if not total_alerts:
+        telegram.send_message("Scan complete: no new +EV opportunities right now.")
 
 
 if __name__ == "__main__":
