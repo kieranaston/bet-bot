@@ -251,6 +251,21 @@ def test_status_excludes_non_placed_alerts():
     assert commands._dispatch(db, settings, "/status") == "No open bets."
 
 
+def test_stats_reports_bankroll_and_settled_performance():
+    db = _db()
+    settings = _fake_settings(starting_bankroll=500.0)
+    _insert_alert(db, event_id="e1", status="placed", placed_stake=25.0)
+    _insert_alert(db, event_id="e2", status="settled_win", placed_stake=40.0, profit=42.0)
+
+    reply = commands._dispatch(db, settings, "/stats")
+
+    assert reply.startswith("*Stats*\n")
+    assert "Bankroll: $500.00" in reply
+    assert "Open bets: 1" in reply
+    assert "Settled: 1 (1W-0L-0P)" in reply
+    assert "Total profit: $42.00" in reply
+
+
 def test_process_updates_advances_offset_and_filters_empty_replies():
     db = _db()
     settings = _fake_settings()

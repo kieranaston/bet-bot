@@ -19,6 +19,7 @@ from betbot.devig import devig
 from betbot.ev import ev_pct
 from betbot.kelly import stake_amount
 from betbot.odds_client import OddsApiClient, OddsApiError
+from betbot.performance import build_report_lines
 from betbot.scheduler import current_scan_window_key, should_alert
 from betbot.storage import Alert, Database
 from betbot.telegram import TelegramClient
@@ -278,13 +279,30 @@ def run() -> None:
     for reply in replies:
         telegram.send_message(reply)
 
-    # 2. Only spend Odds API credits during the configured scan windows (see
+    now = dt.datetime.now(dt.timezone.utc)
+    force_run = os.environ.get("FORCE_RUN") == "true"
+
+    # 2. Send the daily performance digest once a day (config/settings.yaml
+    # `reporting.time_local`), independent of the scan windows below -- same per-window
+    # dedup pattern (a separate "last_daily_report_window" marker) so the continuous poll
+    # loop doesn't resend it on every ~20s tick. scripts/report.py is the manual equivalent.
+    report_window_key = current_scan_window_key(
+        now, [settings.daily_report_time_local], settings.timezone, settings.scan_window_minutes
+    )
+    if force_run or (
+        report_window_key is not None
+        and db.get_kv("last_daily_report_window") != report_window_key
+    ):
+        lines = ["*Daily Bet Bot Report*"] + build_report_lines(db, settings)
+        telegram.send_message("\n".join(lines))
+        if not force_run:
+            db.set_kv("last_daily_report_window", report_window_key)
+
+    # 3. Only spend Odds API credits during the configured scan windows (see
     # config/settings.yaml `scheduling.scan_times_local`). When run() is called by a tight
     # poll loop (e.g. the VPS's continuous Telegram-polling loop) rather than one cron tick
     # per window, current_scan_window_key + the "last_scan_window" marker below ensure the
     # actual scan still only fires once per window, not once per poll.
-    now = dt.datetime.now(dt.timezone.utc)
-    force_run = os.environ.get("FORCE_RUN") == "true"
     window_key = current_scan_window_key(
         now, settings.scan_times_local, settings.timezone, settings.scan_window_minutes
     )
@@ -302,14 +320,14 @@ def run() -> None:
         odds_format=settings.odds_format,
     )
 
-    # 3. Auto-settle any placed bets whose games have finished (cheap flat-rate /scores
+    # 4. Auto-settle any placed bets whose games have finished (cheap flat-rate /scores
     # call, only for sports with something actually pending).
     if settings.settlement_enabled:
         settled = settlement.auto_settle_pending(db, settings, telegram, odds_client)
         if settled:
             logger.info("Auto-settled %d bet(s).", settled)
 
-    # 4. Scan configured sports/markets for +EV lines.
+    # 5. Scan configured sports/markets for +EV lines.
     bankroll = db.current_bankroll(settings.starting_bankroll)
     window_from = now
     window_to = now + dt.timedelta(hours=settings.max_hours_ahead)

@@ -6,6 +6,7 @@ Supported commands:
   /settle <alert_id> win|loss|push Grade a placed bet and update bankroll.
   /bankroll [amount]           Show current bankroll, or set it manually.
   /status                      List bets that are placed but not yet settled.
+  /stats                       Show bankroll + settled performance (wins/losses/ROI).
   /help                        List commands.
 """
 from __future__ import annotations
@@ -14,6 +15,7 @@ import logging
 
 from betbot import settlement
 from betbot.config import Settings
+from betbot.performance import build_report_lines
 from betbot.storage import Alert, Database
 
 logger = logging.getLogger(__name__)
@@ -25,6 +27,7 @@ HELP_TEXT = (
     "`/settle <id> win|loss|push` — grade a bet & update bankroll\n"
     "`/bankroll amount` — show or set current bankroll\n"
     "`/status` — list open (placed, unsettled) bets\n"
+    "`/stats` — bankroll + settled performance (wins/losses/ROI)\n"
     "`/help` — this message"
 )
 
@@ -84,6 +87,8 @@ def _dispatch(db: Database, settings: Settings, text: str) -> str:
             return _cmd_settle(db, settings, args)
         if cmd == "/status":
             return _cmd_status(db, settings)
+        if cmd == "/stats":
+            return _cmd_stats(db, settings)
     except Exception as exc:  # noqa: BLE001 -- surface the error to the user, don't crash the run
         logger.exception("Error handling command %r", text)
         return f"Error handling `{text}`: {exc}"
@@ -170,3 +175,8 @@ def _cmd_status(db: Database, settings: Settings) -> str:
                 f"${a.placed_stake:,.2f}"
             )
         return "\n".join(lines)
+
+
+def _cmd_stats(db: Database, settings: Settings) -> str:
+    lines = ["*Stats*"] + build_report_lines(db, settings)
+    return "\n".join(lines)

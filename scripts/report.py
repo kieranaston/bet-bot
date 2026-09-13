@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
-"""Send a daily Telegram digest: current bankroll, open bets, and settled performance.
-
-.github/workflows/daily_report.yml fires at two fixed UTC times a day (one correct for
-EDT, one for EST) rather than ticking every 10 minutes -- this only actually sends once the
-real Eastern clock time (DST-aware) falls within `reporting.time_local`'s window, so exactly
-one of those two triggers does anything on a given day. Set FORCE_RUN=true to bypass the
-window check (used for a manual "Run workflow" dispatch -- see the workflow file)."""
+"""Manually send the daily Telegram digest on demand (bankroll, open bets, settled
+performance) -- the same digest betbot.main.run() now sends automatically once a day from
+its continuous VPS loop. This script is a manual escape hatch (e.g. via SSH), not scheduled
+by anything itself; set FORCE_RUN=true to bypass the `reporting.time_local` window check."""
 from __future__ import annotations
 
 import datetime as dt
 import os
 
 from betbot.config import Secrets, settings
-from betbot.performance import summarize
+from betbot.performance import build_report_lines
 from betbot.scheduler import is_scan_time
-from betbot.storage import Alert, Database
+from betbot.storage import Database
 from betbot.telegram import TelegramClient
 
 
@@ -30,23 +27,7 @@ def main() -> None:
     db = Database(secrets.database_url)
     telegram = TelegramClient(secrets.telegram_bot_token, secrets.telegram_chat_id)
 
-    bankroll = db.current_bankroll(settings.starting_bankroll)
-    with db.session() as s:
-        all_alerts = s.query(Alert).all()
-        open_bets = [a for a in all_alerts if a.status == "placed"]
-        perf = summarize(all_alerts)
-
-    lines = [
-        "*Daily Bet Bot Report*",
-        f"Bankroll: ${bankroll:,.2f}",
-        f"Open bets: {len(open_bets)}",
-        "",
-        f"Settled: {perf.bets_settled} ({perf.wins}W-{perf.losses}L-{perf.pushes}P)",
-        f"Total staked: ${perf.total_staked:,.2f}",
-        f"Total profit: ${perf.total_profit:,.2f}",
-        f"ROI: {perf.roi_pct:+.1f}%",
-    ]
-
+    lines = ["*Daily Bet Bot Report*"] + build_report_lines(db, settings)
     telegram.send_message("\n".join(lines))
 
 

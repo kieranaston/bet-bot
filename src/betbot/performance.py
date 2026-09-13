@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from betbot.storage import Alert
+from betbot.config import Settings
+from betbot.storage import Alert, Database
 
 
 @dataclass
@@ -35,3 +36,23 @@ def summarize(alerts: list[Alert]) -> PerformanceSummary:
         total_profit=round(total_profit, 2),
         roi_pct=round(roi_pct, 2),
     )
+
+
+def build_report_lines(db: Database, settings: Settings) -> list[str]:
+    """Shared body for both the on-demand `/stats` Telegram command and the automatic daily
+    digest -- bankroll, open bets, and settled performance."""
+    bankroll = db.current_bankroll(settings.starting_bankroll)
+    with db.session() as s:
+        all_alerts = s.query(Alert).all()
+        open_bets = [a for a in all_alerts if a.status == "placed"]
+        perf = summarize(all_alerts)
+
+    return [
+        f"Bankroll: ${bankroll:,.2f}",
+        f"Open bets: {len(open_bets)}",
+        "",
+        f"Settled: {perf.bets_settled} ({perf.wins}W-{perf.losses}L-{perf.pushes}P)",
+        f"Total staked: ${perf.total_staked:,.2f}",
+        f"Total profit: ${perf.total_profit:,.2f}",
+        f"ROI: {perf.roi_pct:+.1f}%",
+    ]
