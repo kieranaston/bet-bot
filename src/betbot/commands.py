@@ -7,18 +7,27 @@ Supported commands:
   /bankroll [amount]           Show current bankroll, or set it manually.
   /status                      List bets that are placed but not yet settled.
   /stats                       Show bankroll + settled performance (wins/losses/ROI).
+  /scan                        Run a scan right now (outside the usual windows) and alert on
+                                +EV lines. Cooldown-limited (see SCAN_COOLDOWN_MINUTES) since
+                                it bypasses the normal scan-window quota gating.
+  /quota                       Show current Odds API usage (used/remaining/% of period used).
   /help                        List commands.
 """
 from __future__ import annotations
 
+import datetime as dt
 import logging
 
 from betbot import settlement
 from betbot.config import Settings
+from betbot.odds_client import OddsApiClient
 from betbot.performance import build_report_lines
 from betbot.storage import Alert, Database
+from betbot.telegram import TelegramClient
 
 logger = logging.getLogger(__name__)
+
+SCAN_COOLDOWN_MINUTES = 5  # protects Odds API quota from an accidental repeated /scan
 
 HELP_TEXT = (
     "*Commands*\n"
@@ -28,6 +37,9 @@ HELP_TEXT = (
     "`/bankroll amount` — show or set current bankroll\n"
     "`/status` — list open (placed, unsettled) bets\n"
     "`/stats` — bankroll + settled performance (wins/losses/ROI)\n"
+    f"`/scan` — run a scan right now and alert on +EV lines (uses Odds API credits, "
+    f"max once every {SCAN_COOLDOWN_MINUTES} min)\n"
+    "`/quota` — show current Odds API usage quota\n"
     "`/help` — this message"
 )
 
@@ -36,6 +48,8 @@ def process_updates(
     db: Database,
     settings: Settings,
     updates: list[dict],
+    telegram: TelegramClient,
+    odds_client: OddsApiClient,
     allowed_chat_id: str | None = None,
 ) -> list[str]:
     """Applies each update's command and returns the reply text(s) to send back, in order.
@@ -59,14 +73,22 @@ def process_updates(
                     last_update_id, chat_id, allowed_chat_id,
                 )
                 continue
-        replies.append(_dispatch(db, settings, message["text"].strip()))
+        replies.append(
+            _dispatch(db, settings, telegram, odds_client, message["text"].strip())
+        )
 
     if last_update_id is not None:
         db.set_kv("telegram_update_offset", str(last_update_id + 1))
     return [r for r in replies if r]
 
 
-def _dispatch(db: Database, settings: Settings, text: str) -> str:
+def _dispatch(
+    db: Database,
+    settings: Settings,
+    telegram: TelegramClient,
+    odds_client: OddsApiClient,
+    text: str,
+) -> str:
     parts = text.split()
     if not parts:
         return ""
@@ -89,6 +111,10 @@ def _dispatch(db: Database, settings: Settings, text: str) -> str:
             return _cmd_status(db, settings)
         if cmd == "/stats":
             return _cmd_stats(db, settings)
+        if cmd == "/scan":
+            return _cmd_scan(db, settings, telegram, odds_client)
+        if cmd == "/quota":
+            return _cmd_quota(odds_client)
     except Exception as exc:  # noqa: BLE001 -- surface the error to the user, don't crash the run
         logger.exception("Error handling command %r", text)
         return f"Error handling `{text}`: {exc}"
@@ -179,4 +205,53 @@ def _cmd_status(db: Database, settings: Settings) -> str:
 
 def _cmd_stats(db: Database, settings: Settings) -> str:
     lines = ["*Stats*"] + build_report_lines(db, settings)
+    return "\n".join(lines)
+
+
+def _cmd_scan(
+    db: Database, settings: Settings, telegram: TelegramClient, odds_client: OddsApiClient
+) -> str:
+    # Local import: betbot.main imports this module to dispatch commands, so importing it
+    # back at module level here would be circular. By the time this runs, main has already
+    # finished importing, so it's safe.
+    from betbot import main as betbot_main
+
+    now = dt.datetime.now(dt.timezone.utc)
+    last_raw = db.get_kv("last_manual_scan_at")
+    if last_raw:
+        elapsed_minutes = (now - dt.datetime.fromisoformat(last_raw)).total_seconds() / 60.0
+        if elapsed_minutes < SCAN_COOLDOWN_MINUTES:
+            wait = SCAN_COOLDOWN_MINUTES - elapsed_minutes
+            return (
+                f"Manual scan on cooldown -- wait {wait:.1f} more minute(s). "
+                f"(Limit: one manual scan per {SCAN_COOLDOWN_MINUTES} min, to protect "
+                "Odds API quota from an accidental repeat.)"
+            )
+    db.set_kv("last_manual_scan_at", now.isoformat())
+
+    bankroll = db.current_bankroll(settings.starting_bankroll)
+    alerts_sent = betbot_main.run_scan(db, settings, telegram, odds_client, bankroll, now)
+    if alerts_sent:
+        return f"Manual scan complete: {alerts_sent} alert(s) sent above."
+    return (
+        "Manual scan complete: no new +EV opportunities right now (this still respects "
+        "the usual re-alert cooldown, so a bet alerted on recently won't repeat here)."
+    )
+
+
+def _cmd_quota(odds_client: OddsApiClient) -> str:
+    quota = odds_client.get_quota()
+    used, remaining, last = quota.get("used"), quota.get("remaining"), quota.get("last")
+    lines = [
+        "*Odds API quota*",
+        f"Used: {used or '?'}",
+        f"Remaining: {remaining or '?'}",
+        f"Last call cost: {last or '?'}",
+    ]
+    try:
+        total = int(used) + int(remaining)
+        if total > 0:
+            lines.append(f"Used {int(used) / total * 100.0:.1f}% of this period's quota")
+    except (TypeError, ValueError):
+        pass  # headers missing/non-numeric -- skip the percentage line rather than crash
     return "\n".join(lines)

@@ -20,7 +20,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import requests
@@ -46,6 +46,7 @@ class OddsApiClient:
     api_key: str
     base_url: str
     odds_format: str = "decimal"
+    last_headers: dict[str, str | None] = field(default_factory=dict)
 
     def _get(self, path: str, params: dict[str, Any], log_label: str) -> Any:
         url = f"{self.base_url}{path}"
@@ -80,6 +81,9 @@ class OddsApiClient:
                 raise OddsApiError(
                     f"The Odds API returned {resp.status_code} for {log_label}: {resp.text[:500]}"
                 )
+            # Stashed so get_quota() can report the latest usage snapshot without assuming
+            # any particular prior call happened this run.
+            self.last_headers = {"used": used, "remaining": remaining, "last": last}
             return resp.json()
 
     def list_sports(self, all_sports: bool = False) -> list[dict[str, Any]]:
@@ -92,6 +96,13 @@ class OddsApiClient:
         if all_sports:
             params["all"] = "true"
         return self._get("/sports", params, "sports list (free)")
+
+    def get_quota(self) -> dict[str, str | None]:
+        """On-demand usage snapshot: {"used", "remaining", "last"} (all usage-credit counts
+        as strings, per the API). Piggybacks on the free /sports call so checking quota never
+        itself costs quota -- see list_sports."""
+        self.list_sports()
+        return self.last_headers
 
     def get_events(
         self,

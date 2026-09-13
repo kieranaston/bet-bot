@@ -14,7 +14,7 @@ import os
 from zoneinfo import ZoneInfo
 
 from betbot import commands, settlement
-from betbot.config import Secrets, settings
+from betbot.config import Secrets, Settings, settings
 from betbot.devig import devig
 from betbot.ev import ev_pct
 from betbot.kelly import stake_amount
@@ -261,19 +261,67 @@ def _send_alert_message(telegram: TelegramClient, alert: Alert) -> None:
     telegram.send_message("\n".join(lines))
 
 
+def run_scan(db: Database, settings: Settings, telegram: TelegramClient,
+             odds_client: OddsApiClient, bankroll: float, now: dt.datetime) -> int:
+    """Fetch odds for every configured sport and alert on +EV lines. Returns the number of
+    alerts sent. Shared by the scheduled scan window (step 5 below) and the on-demand
+    `/scan` Telegram command -- callers own their own quota/dedup gating around this."""
+    window_from = now
+    window_to = now + dt.timedelta(hours=settings.max_hours_ahead)
+    total_alerts = 0
+    for sport in settings.sports:
+        sport_key, markets = sport["key"], sport["markets"]
+
+        # Free precheck (an empty /odds response also costs 0, per the docs, but this
+        # skips an unnecessary round-trip/rate-limit hit for sports with nothing upcoming).
+        try:
+            upcoming = odds_client.get_events(sport_key, window_from, window_to)
+        except OddsApiError:
+            logger.exception("Failed to fetch events for %s", sport_key)
+            continue
+        if not upcoming:
+            logger.info("No upcoming %s events in window -- skipping odds fetch.", sport_key)
+            continue
+
+        try:
+            events = odds_client.get_odds(
+                sport_key,
+                markets,
+                bookmakers=settings.scan_bookmakers,
+                commence_time_from=window_from,
+                commence_time_to=window_to,
+                include_links=True,
+            )
+        except OddsApiError:
+            logger.exception("Failed to fetch odds for %s", sport_key)
+            continue
+        for event in events:
+            total_alerts += process_event(
+                db, telegram, event, sport_key, markets, bankroll, now
+            )
+    return total_alerts
+
+
 def run() -> None:
     secrets = Secrets.from_env()
     db = Database(secrets.database_url)
     telegram = TelegramClient(secrets.telegram_bot_token, secrets.telegram_chat_id)
+    odds_client = OddsApiClient(
+        api_key=secrets.odds_api_key,
+        base_url=settings.odds_api_base_url,
+        odds_format=settings.odds_format,
+    )
 
     # 1. Apply any Telegram commands the user sent since the last run. This runs on every
     # tick regardless of scan windows -- it's free (no Odds API calls), and keeps /placed,
     # /skip, /settle etc. responsive rather than waiting hours for the next real scan.
+    # (/scan and /quota do spend Odds API credits, but only when the user actually sends them.)
     offset_raw = db.get_kv("telegram_update_offset")
     offset = int(offset_raw) if offset_raw else None
     updates = telegram.get_updates(offset)
     replies = commands.process_updates(
-        db, settings, updates, allowed_chat_id=secrets.telegram_chat_id.strip()
+        db, settings, updates, telegram, odds_client,
+        allowed_chat_id=secrets.telegram_chat_id.strip(),
     )
     logger.info("Telegram: fetched %d update(s), sending %d reply(ies).", len(updates), len(replies))
     for reply in replies:
@@ -314,12 +362,6 @@ def run() -> None:
             logger.info("Already scanned this window (%s) -- skipping odds fetch.", window_key)
             return
 
-    odds_client = OddsApiClient(
-        api_key=secrets.odds_api_key,
-        base_url=settings.odds_api_base_url,
-        odds_format=settings.odds_format,
-    )
-
     # 4. Auto-settle any placed bets whose games have finished (cheap flat-rate /scores
     # call, only for sports with something actually pending).
     if settings.settlement_enabled:
@@ -329,39 +371,7 @@ def run() -> None:
 
     # 5. Scan configured sports/markets for +EV lines.
     bankroll = db.current_bankroll(settings.starting_bankroll)
-    window_from = now
-    window_to = now + dt.timedelta(hours=settings.max_hours_ahead)
-    total_alerts = 0
-    for sport in settings.sports:
-        sport_key, markets = sport["key"], sport["markets"]
-
-        # Free precheck (an empty /odds response also costs 0, per the docs, but this
-        # skips an unnecessary round-trip/rate-limit hit for sports with nothing upcoming).
-        try:
-            upcoming = odds_client.get_events(sport_key, window_from, window_to)
-        except OddsApiError:
-            logger.exception("Failed to fetch events for %s", sport_key)
-            continue
-        if not upcoming:
-            logger.info("No upcoming %s events in window -- skipping odds fetch.", sport_key)
-            continue
-
-        try:
-            events = odds_client.get_odds(
-                sport_key,
-                markets,
-                bookmakers=settings.scan_bookmakers,
-                commence_time_from=window_from,
-                commence_time_to=window_to,
-                include_links=True,
-            )
-        except OddsApiError:
-            logger.exception("Failed to fetch odds for %s", sport_key)
-            continue
-        for event in events:
-            total_alerts += process_event(
-                db, telegram, event, sport_key, markets, bankroll, now
-            )
+    total_alerts = run_scan(db, settings, telegram, odds_client, bankroll, now)
     if not force_run:
         db.set_kv("last_scan_window", window_key)
     logger.info("Scan complete: %d new/updated alert(s) sent.", total_alerts)

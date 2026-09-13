@@ -76,6 +76,11 @@ tracks your bankroll and performance over time.
      and (if you pass the closing line) tracks closing-line value (CLV)
    - `/bankroll [amount]` — check or manually correct your bankroll
    - `/status` — list bets you've placed that aren't settled yet
+   - `/stats` — bankroll + settled performance (wins/losses/ROI)
+   - `/scan` — run a scan on demand instead of waiting for the next window (uses Odds API
+     credits, same as an automatic scan; rate-limited to once every
+     `commands.SCAN_COOLDOWN_MINUTES` (5 min) so a repeated tap can't blow through quota)
+   - `/quota` — check Odds API usage (used/remaining/% of the current period used)
 7. A second workflow (`.github/workflows/daily_report.yml`) sends a daily digest:
    bankroll, open bets, win/loss record, ROI, average CLV.
 
@@ -168,6 +173,32 @@ python -m betbot.main  # run one scan
 python scripts/report.py  # send a daily-digest-style message on demand
 ```
 
+## Updating the running VPS deployment
+
+If the bot is running continuously on a VPS via Docker (rather than GitHub Actions), pushing
+to GitHub does **not** update it by itself — you need to redeploy manually:
+
+```bash
+ssh <your-username>@<VM_EXTERNAL_IP>
+cd ~/bet-bot
+git pull
+docker build -t bet-bot .
+docker stop bet-bot
+docker rm bet-bot
+docker run -d --name bet-bot --restart unless-stopped --env-file .env -v $(pwd)/data:/app/data bet-bot
+```
+
+Then confirm it picked up the change:
+
+```bash
+docker logs -f bet-bot
+```
+
+You should see a Telegram poll log line within ~20 seconds (`Ctrl+C` to stop watching the
+logs — this does not stop the container). `--restart unless-stopped` means the container
+survives VM reboots and restarts automatically if it ever crashes, so you only need to
+redeploy when the code itself changes.
+
 ## Alternative: running without GitHub Actions
 
 If you'd rather run this on an always-on box (VPS, home server, Raspberry Pi) instead of
@@ -193,7 +224,7 @@ src/betbot/
   settlement.py           win/loss/push grading + auto-settle via /scores
   storage.py              SQLAlchemy models (alerts, bankroll history, kv state)
   telegram.py             Telegram Bot API client (send + short-poll getUpdates)
-  commands.py             parses /placed, /skip, /settle, /bankroll, /status
+  commands.py             parses /placed, /skip, /settle, /bankroll, /status, /scan, /quota
   performance.py          ROI / win-rate / CLV rollups
   main.py                 orchestrates a single scan run
 scripts/
