@@ -1,17 +1,15 @@
 name: Scan for +EV bets
 
 on:
-  # GitHub's own `schedule:` trigger is unreliable for this repo at anything faster than a
-  # few-times-a-day cadence -- confirmed dropping ~98% of ticks at */10 and 100% of ticks at
-  # twice-hourly, on 2026-09-12, surviving a workflow rename/recreate and an API
-  # disable/re-enable. Firing is now driven externally: a free cron-job.org job calls the
-  # GitHub REST API's `workflow_dispatch` endpoint every 30 minutes instead. Don't re-add a
-  # `schedule:` block here without re-verifying it actually fires reliably first.
-  #
-  # Every cron-job.org tick is a normal, scan-window-gated run (force defaults false) so this
-  # still costs ~8 real Odds API scans/day, not one per tick -- see betbot.main's is_scan_time
-  # gate. Use the "force" checkbox in the Actions UI's "Run workflow" button to bypass the
-  # window for a manual one-off scan.
+  # GitHub's schedule trigger was confirmed unreliable at higher frequencies on 2026-09-12:
+  # dropped ~98% of ticks at */10 and 100% of ticks at twice-hourly, surviving a workflow
+  # rename/recreate and an API disable/re-enable. Dropping to a low, infrequent cadence
+  # instead of chasing an external trigger -- accepting laggier Telegram command replies
+  # (up to ~3h between ticks) in exchange for actually running reliably. If runs stop
+  # showing up again, don't just re-tune the cron -- confirm via `gh run list
+  # --workflow=betbot-scan.yml` before assuming a config change fixed anything.
+  schedule:
+    - cron: "0 */3 * * *"
   workflow_dispatch:
     inputs:
       force:
