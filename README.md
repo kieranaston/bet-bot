@@ -16,16 +16,16 @@ is the primary deployment.
    the VPS. Each iteration polls Telegram for new commands (`/placed`, `/skip`, `/settle`,
    `/scan`, etc.) — that's free, so this stays responsive between real scans — then checks
    whether it's time to actually spend Odds API credits.
-2. Real scans only happen 8x/day, evenly every 3 hours, configurable via
+2. Real scans only happen hourly, 10am-11pm Eastern (14x/day), configurable via
    `config/settings.yaml` `scheduling.scan_times_local` — checked in real, DST-aware
    Eastern clock time via `betbot.scheduler.is_scan_time`, not a fixed UTC cron, so it stays
    correct across daylight saving changes. Since the poll loop ticks far more often than
    that, `betbot.scheduler.current_scan_window_key` + a `last_scan_window` marker in the
-   database make sure each 3-hour window is only actually scanned once, not once per ~20s
-   poll. Scans are spaced evenly around the clock rather than bursted around game days or US
-   evening hours — the portfolio spans enough sports that most days have something live, and
-   Pinnacle's soccer lines trade during European business hours (US overnight/early-morning
-   ET), so there's no clock window where the sharp reference is reliably idle.
+   database make sure each hourly window is only actually scanned once, not once per ~20s
+   poll. Deliberately restricted to waking/actionable hours rather than round-the-clock —
+   an alert at 3am ET is useless if you're asleep and can't act on it before the price
+   moves, even though Pinnacle's soccer lines are most active overnight (European business
+   hours). Overnight soccer mispricings are a known, accepted gap in this schedule.
 3. Per sport, it first hits the free `/events` endpoint to check whether anything's even
    upcoming, skipping the odds call entirely if not (an empty `/odds` response also costs
    0 credits per the docs, so this mainly saves a round-trip rather than credits). Otherwise
@@ -35,8 +35,8 @@ is the primary deployment.
    [The Odds API](https://the-odds-api.com/) via `bookmakers=` — Pinnacle + your 6 Ontario
    books, 7 keys total. The Odds API's docs confirm "every group of 10 bookmakers is the
    equivalent of 1 region," so our 7 books cost 1 region-equivalent instead of the 2 regions
-   `regions=eu,ca` would need for the same data. That's roughly 5,300 credits/month at 8
-   scans/day (well within a 20,000/month plan) — sized to stay on markets/leagues where
+   `regions=eu,ca` would need for the same data. That's roughly 9,200 credits/month at 14
+   scans/day (~46% of a 20,000/month plan) — sized to stay on markets/leagues where
    Pinnacle is still a sharp, liquid reference, deliberately not extended to player props or
    thin/niche leagues where "true odds" would be less trustworthy. The h2h-only restriction
    on CFL/MMA/soccer follows the docs' own caveat that "spreads and totals markets are mainly
@@ -141,7 +141,7 @@ Telegram command to adjust it).
 
 Any small VPS works. A free-tier VM (e.g. Google Cloud's `e2-micro`, always-free in
 `us-west1`/`us-central1`/`us-east1`) is enough for this — the bot is lightweight and only
-does real work 8x/day.
+does real work ~14x/day.
 
 1. Create an Ubuntu 24.04 VM and SSH into it.
 2. Install Docker and git:
@@ -299,8 +299,8 @@ Dockerfile                 how the VPS runs the bot (continuous poll loop)
   spreads/totals; if a book's line differs from Pinnacle's, that outcome is skipped rather
   than approximated.
 - Auto-settlement only checks games within `settlement.days_from` (2 days) of finishing,
-  and only runs alongside a real scan (8x/day) — a bet can sit unsettled for a few hours
-  after its game ends before the next scan catches it. `/settle` still works manually if
+  and only runs alongside a real scan (hourly, 10am-11pm ET) — a bet finishing overnight
+  can sit unsettled until the next scan window catches it. `/settle` still works manually if
   you don't want to wait.
 - Bookmaker homepage URLs in `config/bookmakers.yaml` (`homepage_urls`, used as the final
   deep-link fallback) are best-effort guesses, not verified against each book's actual

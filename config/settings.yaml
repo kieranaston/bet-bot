@@ -89,34 +89,33 @@ odds_api:
   base_url: "https://api.the-odds-api.com/v4"
 
 scheduling:
-  # We spend Odds API credits 8x/day (every 3 hours), at these local times. Checked in real
-  # Eastern clock time (DST-aware via zoneinfo) -- .github/workflows/betbot-scan.yml ticks twice
-  # an hour, but betbot.main only actually calls the Odds API when "now" falls within
-  # `scan_window_minutes` of one of these times. Window is 30 min (not 10) so a delayed
-  # :08 UTC tick still counts as the :00 ET scan, without overlapping the :38 command-only
-  # tick. No manual DST edits needed.
+  # We spend Odds API credits hourly, 10am-11pm Eastern (your stated waking/actionable
+  # hours) -- checked in real Eastern clock time (DST-aware via zoneinfo). Since the VPS
+  # runs a continuous ~20s poll loop (not a coarse external tick), `scan_window_minutes`
+  # only needs to be wide enough to tolerate that loop's own granularity, not an external
+  # scheduler's delay -- kept at 30 min anyway since these hourly slots are spaced far
+  # enough apart (60 min) that a wider window doesn't risk bleeding into the next slot.
   #
-  # Deliberately even round-the-clock spacing, not day-of-week or overnight-skipping bursts:
-  # (1) the portfolio now spans NFL/NBA/NHL/MLB/NCAAF/CFL/MMA plus 5 soccer leagues, so
-  #     almost every day has something live -- day-level bursting mostly stopped applying
-  #     once coverage got this broad; (2) the obvious "skip the ET overnight hours" idea is
-  #     wrong here specifically because Pinnacle's soccer lines trade during European
-  #     business hours, which fall in the US overnight/early-morning ET window -- cutting
-  #     that window would cut exactly when a chunk of our sharp reference is most active.
-  # At ~22 credits/scan (12 sports' markets x 1 region-equivalent) x 8 scans/day, that's
-  # ~5,280 credits/month -- ~26% of a 20,000/month plan.
+  # Deliberately NOT round-the-clock: earlier reasoning favored even spacing so Pinnacle's
+  # overnight-ET soccer activity (European business hours) wouldn't be missed, but an alert
+  # at 3am ET is useless if you're asleep and can't act on it before the price moves --
+  # your ability to actually place the bet matters more than catching every window a sharp
+  # line happens to be most active. Overnight soccer mispricings are simply not caught by
+  # this schedule; that's an accepted, deliberate tradeoff, not an oversight.
+  # At ~22 credits/scan (12 sports' markets x 1 region-equivalent) x 14 scans/day, that's
+  # ~9,240 credits/month -- ~46% of a 20,000/month plan.
   timezone: "America/Toronto"
-  scan_times_local: ["00:00", "03:00", "06:00", "09:00", "12:00", "15:00", "18:00", "21:00"]
+  scan_times_local: ["10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00", "21:00", "22:00", "23:00"]
   scan_window_minutes: 30
 
   # Adaptive re-alert cooldown tiers, keyed by hours-to-commence -> minimum minutes between
   # re-alerting the *same* (event, market, bookmaker, outcome) unless the price moves. These
-  # values are real-elapsed-time throttles and don't need retuning for the 3-hour scan gap
-  # above: at the old 6-hour gap, the <=6h/<=24h tiers were mostly moot (cooldown < gap, so
-  # they always re-alerted regardless of the tier value -- only the >24h tier did anything).
-  # The tighter 3-hour gap lets the <=24h/>24h tiers finally throttle as designed (2x and 4x
-  # scan-skipping respectively), while near-game tiers now alert almost every scan -- which
-  # is the intended behavior: more frequent reminders as the decision deadline approaches.
+  # are real-elapsed-time throttles, independent of the scan gap above -- with the current
+  # 1-hour gap, the <=1h tier (60 min cooldown) still re-alerts almost every scan as
+  # intended (more frequent reminders as the decision deadline approaches), while the
+  # <=6h/<=24h/>24h tiers now skip roughly 3x/6x/12x as many scans between re-alerts as they
+  # did at the old 3-hour gap -- not re-tuned for that yet, since fewer/gentler reminders on
+  # a lower-urgency bet isn't obviously wrong, just untested against the new cadence.
   tiers:
     - max_hours_to_commence: 1
       cooldown_minutes: 60
