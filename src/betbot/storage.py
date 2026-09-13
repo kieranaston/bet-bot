@@ -13,6 +13,7 @@ from sqlalchemy import (
     Float,
     Integer,
     String,
+    TypeDecorator,
     UniqueConstraint,
     create_engine,
 )
@@ -25,13 +26,33 @@ def utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
 
+class AwareDateTime(TypeDecorator):
+    """DateTime(timezone=True) doesn't actually round-trip tzinfo through SQLite -- it has
+    no native timezone-aware type, so a stored aware datetime silently comes back naive
+    (confirmed: tzinfo is None after a commit+reload). That crashes the very first
+    naive-vs-aware subtraction against an aware "now" (e.g. scheduler.should_alert comparing
+    against a previously-alerted Alert's last_alerted_at), which only bit us once alerts
+    started actually being re-evaluated across scans on the VPS's local SQLite DB -- it
+    never showed up under Postgres, which preserves tzinfo correctly. Always returns a
+    UTC-aware datetime on read regardless of backend, so callers never have to think about
+    which DB is behind DATABASE_URL."""
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_result_value(self, value: dt.datetime | None, dialect) -> dt.datetime | None:
+        if value is not None and value.tzinfo is None:
+            value = value.replace(tzinfo=dt.timezone.utc)
+        return value
+
+
 class KVState(Base):
     """Generic key/value store: telegram update offset, current bankroll, etc."""
 
     __tablename__ = "kv_state"
     key = Column(String, primary_key=True)
     value = Column(String, nullable=False)
-    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    updated_at = Column(AwareDateTime, default=utcnow, onupdate=utcnow)
 
 
 class BankrollHistory(Base):
@@ -39,7 +60,7 @@ class BankrollHistory(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     amount = Column(Float, nullable=False)
     reason = Column(String, nullable=False)
-    created_at = Column(DateTime(timezone=True), default=utcnow)
+    created_at = Column(AwareDateTime, default=utcnow)
 
 
 class Alert(Base):
@@ -57,7 +78,7 @@ class Alert(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     event_id = Column(String, nullable=False)
     sport_key = Column(String, nullable=False)
-    commence_time = Column(DateTime(timezone=True), nullable=False)
+    commence_time = Column(AwareDateTime, nullable=False)
     home_team = Column(String, nullable=False)
     away_team = Column(String, nullable=False)
     market = Column(String, nullable=False)  # h2h | spreads | totals
@@ -77,9 +98,9 @@ class Alert(Base):
     closing_odds = Column(Float, nullable=True)  # for CLV, filled in at /settle time
     profit = Column(Float, nullable=True)  # realized profit/loss once settled
 
-    first_seen_at = Column(DateTime(timezone=True), default=utcnow)
-    last_alerted_at = Column(DateTime(timezone=True), nullable=True)
-    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    first_seen_at = Column(AwareDateTime, default=utcnow)
+    last_alerted_at = Column(AwareDateTime, nullable=True)
+    updated_at = Column(AwareDateTime, default=utcnow, onupdate=utcnow)
 
     def outcome_display(self) -> str:
         """Outcome name with the spread/total line attached, e.g. "Bills -3.5" or

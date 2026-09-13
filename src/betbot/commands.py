@@ -240,13 +240,16 @@ def _cmd_scan(
 
 
 def _cmd_quota(odds_client: OddsApiClient) -> str:
+    # Deliberately doesn't show "last call cost": get_quota() always calls the free
+    # /sports endpoint to check itself, and a fresh OddsApiClient is created every ~20s
+    # loop tick, so that field could only ever reflect the cost of this check call (always
+    # 0) -- never a real scan's cost, which happened in a different tick's client instance.
     quota = odds_client.get_quota()
-    used, remaining, last = quota.get("used"), quota.get("remaining"), quota.get("last")
+    used, remaining = quota.get("used"), quota.get("remaining")
     lines = [
         "*Odds API quota*",
         f"Used: {used or '?'}",
         f"Remaining: {remaining or '?'}",
-        f"Last call cost: {last or '?'}",
     ]
     try:
         total = int(used) + int(remaining)
