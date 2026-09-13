@@ -47,9 +47,8 @@ class Secrets:
             # Defaults to a local sqlite file so the bot works out of the box for local/VPS
             # runs. For GitHub Actions you MUST set this to a hosted DB (e.g. Supabase
             # Postgres) since the runner's disk doesn't persist between runs.
-            database_url=os.environ.get(
-                "DATABASE_URL", f"sqlite:///{REPO_ROOT / 'data' / 'betbot.db'}"
-            ),
+            database_url=os.environ.get("DATABASE_URL")
+            or f"sqlite:///{REPO_ROOT / 'data' / 'betbot.db'}",
         )
 
 
