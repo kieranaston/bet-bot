@@ -156,7 +156,7 @@ def test_skip_marks_alert_skipped():
 def test_settle_bad_usage():
     db = _db()
     settings = _fake_settings()
-    expected = "Usage: /settle <alert_id> win|loss|push [closing_odds]"
+    expected = "Usage: /settle <alert_id> win|loss|push"
     assert commands._dispatch(db, settings, "/settle 1") == expected
     assert commands._dispatch(db, settings, "/settle 1 maybe") == expected
 
@@ -187,24 +187,23 @@ def test_settle_already_settled():
     assert reply == f"Alert #{alert_id} is already settled (settled_win)."
 
 
-def test_settle_win_updates_bankroll_and_records_closing_odds():
+def test_settle_win_updates_bankroll():
     db = _db()
     settings = _fake_settings(starting_bankroll=1000.0)
     alert_id = _insert_alert(
         db, status="placed", placed_stake=40.0, book_odds=2.05, market="h2h", point=None
     )
 
-    reply = commands._dispatch(db, settings, f"/settle {alert_id} win 2.00")
+    reply = commands._dispatch(db, settings, f"/settle {alert_id} win")
 
     assert reply == f"Settled #{alert_id} as WIN: +42.00. Bankroll now $1,042.00"
     with db.session() as s:
         alert = s.get(Alert, alert_id)
         assert alert.status == "settled_win"
-        assert alert.closing_odds == 2.00
         assert alert.profit == 42.00
 
 
-def test_settle_loss_without_closing_odds():
+def test_settle_loss_updates_bankroll():
     db = _db()
     settings = _fake_settings(starting_bankroll=1000.0)
     alert_id = _insert_alert(db, status="placed", placed_stake=40.0, market="h2h", point=None)
@@ -213,7 +212,7 @@ def test_settle_loss_without_closing_odds():
 
     assert reply == f"Settled #{alert_id} as LOSS: -40.00. Bankroll now $960.00"
     with db.session() as s:
-        assert s.get(Alert, alert_id).closing_odds is None
+        assert s.get(Alert, alert_id).status == "settled_loss"
 
 
 def test_status_no_open_bets():

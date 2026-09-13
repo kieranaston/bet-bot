@@ -3,9 +3,7 @@
 Supported commands:
   /placed <alert_id> [stake]   Mark a bet as placed (defaults to the recommended stake).
   /skip <alert_id>             Mark an alert as skipped (won't be re-alerted).
-  /settle <alert_id> win|loss|push [closing_odds]
-                                Grade a placed bet, update bankroll, optionally record the
-                                closing line for CLV tracking.
+  /settle <alert_id> win|loss|push Grade a placed bet and update bankroll.
   /bankroll [amount]           Show current bankroll, or set it manually.
   /status                      List bets that are placed but not yet settled.
   /help                        List commands.
@@ -24,7 +22,7 @@ HELP_TEXT = (
     "*Commands*\n"
     "`/placed <id> stake` — mark a bet placed (defaults to recommended stake)\n"
     "`/skip <id>` — dismiss an alert\n"
-    "`/settle <id> win|loss|push closing_odds` — grade a bet & update bankroll\n"
+    "`/settle <id> win|loss|push` — grade a bet & update bankroll\n"
     "`/bankroll amount` — show or set current bankroll\n"
     "`/status` — list open (placed, unsettled) bets\n"
     "`/help` — this message"
@@ -137,10 +135,9 @@ def _cmd_skip(db: Database, args: list[str]) -> str:
 
 def _cmd_settle(db: Database, settings: Settings, args: list[str]) -> str:
     if len(args) < 2 or args[1].lower() not in ("win", "loss", "push"):
-        return "Usage: /settle <alert_id> win|loss|push [closing_odds]"
+        return "Usage: /settle <alert_id> win|loss|push"
     alert_id = int(args[0])
     outcome = args[1].lower()
-    closing_odds = float(args[2]) if len(args) > 2 else None
 
     with db.session() as s:
         alert = _get_alert(s, alert_id)
@@ -150,9 +147,6 @@ def _cmd_settle(db: Database, settings: Settings, args: list[str]) -> str:
             return f"Alert #{alert_id} was never marked /placed -- nothing to settle."
         if alert.status.startswith("settled_"):
             return f"Alert #{alert_id} is already settled ({alert.status})."
-
-        if closing_odds is not None:
-            alert.closing_odds = closing_odds
 
         new_bankroll = settlement.apply_settlement(db, settings, alert, outcome)
         return (

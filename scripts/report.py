@@ -46,8 +46,6 @@ def main() -> None:
         f"Total profit: ${perf.total_profit:,.2f}",
         f"ROI: {perf.roi_pct:+.1f}%",
     ]
-    if perf.avg_clv_pct is not None:
-        lines.append(f"Avg CLV: {perf.avg_clv_pct:+.2f}%")
 
     telegram.send_message("\n".join(lines))
 
