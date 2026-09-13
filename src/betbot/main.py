@@ -19,7 +19,7 @@ from betbot.devig import devig
 from betbot.ev import ev_pct
 from betbot.kelly import stake_amount
 from betbot.odds_client import OddsApiClient, OddsApiError
-from betbot.scheduler import is_scan_time, should_alert
+from betbot.scheduler import current_scan_window_key, should_alert
 from betbot.storage import Alert, Database
 from betbot.telegram import TelegramClient
 
@@ -279,14 +279,22 @@ def run() -> None:
         telegram.send_message(reply)
 
     # 2. Only spend Odds API credits during the configured scan windows (see
-    # config/settings.yaml `scheduling.scan_times_local`).
+    # config/settings.yaml `scheduling.scan_times_local`). When run() is called by a tight
+    # poll loop (e.g. the VPS's continuous Telegram-polling loop) rather than one cron tick
+    # per window, current_scan_window_key + the "last_scan_window" marker below ensure the
+    # actual scan still only fires once per window, not once per poll.
     now = dt.datetime.now(dt.timezone.utc)
     force_run = os.environ.get("FORCE_RUN") == "true"
-    if not force_run and not is_scan_time(
+    window_key = current_scan_window_key(
         now, settings.scan_times_local, settings.timezone, settings.scan_window_minutes
-    ):
-        logger.info("Outside scheduled scan window -- skipping odds fetch.")
-        return
+    )
+    if not force_run:
+        if window_key is None:
+            logger.info("Outside scheduled scan window -- skipping odds fetch.")
+            return
+        if db.get_kv("last_scan_window") == window_key:
+            logger.info("Already scanned this window (%s) -- skipping odds fetch.", window_key)
+            return
 
     odds_client = OddsApiClient(
         api_key=secrets.odds_api_key,
@@ -336,6 +344,8 @@ def run() -> None:
             total_alerts += process_event(
                 db, telegram, event, sport_key, markets, bankroll, now
             )
+    if not force_run:
+        db.set_kv("last_scan_window", window_key)
     logger.info("Scan complete: %d new/updated alert(s) sent.", total_alerts)
 
 

@@ -16,17 +16,28 @@ import datetime as dt
 from zoneinfo import ZoneInfo
 
 
-def is_scan_time(
+def current_scan_window_key(
     now_utc: dt.datetime, scan_times_local: list[str], timezone: str, window_minutes: int
-) -> bool:
+) -> str | None:
+    """Returns a stable identifier for the scan window `now_utc` currently falls in (the
+    matched slot's local ISO timestamp), or None if it's not within any window. Callers that
+    poll far more often than once per window (e.g. a continuously-running loop rather than
+    one cron tick per window) can use this to only actually scan once per window instead of
+    every poll."""
     local = now_utc.astimezone(ZoneInfo(timezone))
     for time_str in scan_times_local:
         hour, minute = (int(part) for part in time_str.split(":"))
         target = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
         elapsed_minutes = (local - target).total_seconds() / 60.0
         if 0 <= elapsed_minutes < window_minutes:
-            return True
-    return False
+            return target.isoformat()
+    return None
+
+
+def is_scan_time(
+    now_utc: dt.datetime, scan_times_local: list[str], timezone: str, window_minutes: int
+) -> bool:
+    return current_scan_window_key(now_utc, scan_times_local, timezone, window_minutes) is not None
 
 
 def cooldown_minutes_for(hours_to_commence: float, tiers: list[dict]) -> float:
