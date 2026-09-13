@@ -16,16 +16,18 @@ is the primary deployment.
    the VPS. Each iteration polls Telegram for new commands (`/placed`, `/skip`, `/settle`,
    `/scan`, etc.) — that's free, so this stays responsive between real scans — then checks
    whether it's time to actually spend Odds API credits.
-2. Real scans only happen hourly, 10am-11pm Eastern (14x/day), configurable via
-   `config/settings.yaml` `scheduling.scan_times_local` — checked in real, DST-aware
+2. Real scans only happen every 30 minutes, 10am-11:30pm Eastern (28x/day), configurable
+   via `config/settings.yaml` `scheduling.scan_times_local` — checked in real, DST-aware
    Eastern clock time via `betbot.scheduler.is_scan_time`, not a fixed UTC cron, so it stays
    correct across daylight saving changes. Since the poll loop ticks far more often than
    that, `betbot.scheduler.current_scan_window_key` + a `last_scan_window` marker in the
-   database make sure each hourly window is only actually scanned once, not once per ~20s
-   poll. Deliberately restricted to waking/actionable hours rather than round-the-clock —
-   an alert at 3am ET is useless if you're asleep and can't act on it before the price
+   database make sure each 30-minute window is only actually scanned once, not once per
+   ~20s poll. Deliberately restricted to waking/actionable hours rather than round-the-clock
+   — an alert at 3am ET is useless if you're asleep and can't act on it before the price
    moves, even though Pinnacle's soccer lines are most active overnight (European business
-   hours). Overnight soccer mispricings are a known, accepted gap in this schedule.
+   hours). Overnight soccer mispricings are a known, accepted gap in this schedule. The
+   28x/day cadence is a deliberate choice to use a high fraction of the monthly Odds API
+   budget (not just "more than before") — see the cost breakdown below.
 3. Per sport, it first hits the free `/events` endpoint to check whether anything's even
    upcoming, skipping the odds call entirely if not (an empty `/odds` response also costs
    0 credits per the docs, so this mainly saves a round-trip rather than credits). Otherwise
@@ -35,8 +37,10 @@ is the primary deployment.
    [The Odds API](https://the-odds-api.com/) via `bookmakers=` — Pinnacle + your 6 Ontario
    books, 7 keys total. The Odds API's docs confirm "every group of 10 bookmakers is the
    equivalent of 1 region," so our 7 books cost 1 region-equivalent instead of the 2 regions
-   `regions=eu,ca` would need for the same data. That's roughly 9,200 credits/month at 14
-   scans/day (~46% of a 20,000/month plan) — sized to stay on markets/leagues where
+   `regions=eu,ca` would need for the same data. That's roughly 18,480 credits/month
+   worst-case at 28 scans/day (~92% of a 20,000/month plan; realistic days come in lower
+   since sports with no live game skip their paid call for free) — sized to stay on
+   markets/leagues where
    Pinnacle is still a sharp, liquid reference, deliberately not extended to player props or
    thin/niche leagues where "true odds" would be less trustworthy. The h2h-only restriction
    on CFL/MMA/soccer follows the docs' own caveat that "spreads and totals markets are mainly
@@ -141,7 +145,7 @@ Telegram command to adjust it).
 
 Any small VPS works. A free-tier VM (e.g. Google Cloud's `e2-micro`, always-free in
 `us-west1`/`us-central1`/`us-east1`) is enough for this — the bot is lightweight and only
-does real work ~14x/day.
+does real work ~28x/day.
 
 1. Create an Ubuntu 24.04 VM and SSH into it.
 2. Install Docker and git:
@@ -299,7 +303,7 @@ Dockerfile                 how the VPS runs the bot (continuous poll loop)
   spreads/totals; if a book's line differs from Pinnacle's, that outcome is skipped rather
   than approximated.
 - Auto-settlement only checks games within `settlement.days_from` (2 days) of finishing,
-  and only runs alongside a real scan (hourly, 10am-11pm ET) — a bet finishing overnight
+  and only runs alongside a real scan (every 30 min, 10am-11:30pm ET) — a bet finishing overnight
   can sit unsettled until the next scan window catches it. `/settle` still works manually if
   you don't want to wait.
 - Bookmaker homepage URLs in `config/bookmakers.yaml` (`homepage_urls`, used as the final

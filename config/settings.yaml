@@ -89,12 +89,12 @@ odds_api:
   base_url: "https://api.the-odds-api.com/v4"
 
 scheduling:
-  # We spend Odds API credits hourly, 10am-11pm Eastern (your stated waking/actionable
-  # hours) -- checked in real Eastern clock time (DST-aware via zoneinfo). Since the VPS
-  # runs a continuous ~20s poll loop (not a coarse external tick), `scan_window_minutes`
-  # only needs to be wide enough to tolerate that loop's own granularity, not an external
-  # scheduler's delay -- kept at 30 min anyway since these hourly slots are spaced far
-  # enough apart (60 min) that a wider window doesn't risk bleeding into the next slot.
+  # We spend Odds API credits every 30 min, 10am-11:30pm Eastern (your stated
+  # waking/actionable hours) -- checked in real Eastern clock time (DST-aware via
+  # zoneinfo). `scan_window_minutes` is set to exactly match this 30-min slot spacing: at
+  # the boundary between two slots (e.g. exactly 10:30:00), the elapsed-minutes check for
+  # the earlier slot is `30 < 30` (False, correctly excluded) while the later slot's check
+  # is `0 <= 0 < 30` (True) -- so adjacent windows abut with zero gap and zero overlap.
   #
   # Deliberately NOT round-the-clock: earlier reasoning favored even spacing so Pinnacle's
   # overnight-ET soccer activity (European business hours) wouldn't be missed, but an alert
@@ -102,10 +102,16 @@ scheduling:
   # your ability to actually place the bet matters more than catching every window a sharp
   # line happens to be most active. Overnight soccer mispricings are simply not caught by
   # this schedule; that's an accepted, deliberate tradeoff, not an oversight.
-  # At ~22 credits/scan (12 sports' markets x 1 region-equivalent) x 14 scans/day, that's
-  # ~9,240 credits/month -- ~46% of a 20,000/month plan.
+  #
+  # 28 scans/day deliberately targets a high fraction of the monthly budget (per your
+  # request), not just "more scans than before": at ~22 credits/scan worst-case (12
+  # sports' markets x 1 region-equivalent, every sport with a live game), that's
+  # ~18,480 credits/month -- ~92% of a 20,000/month plan. Realistic days come in lower
+  # (NBA/NHL etc. often have no upcoming game and skip their paid call for free -- actual
+  # logged scans have cost as little as 16 credits), giving a natural safety margin
+  # against ever exceeding the plan without needing to budget for it explicitly.
   timezone: "America/Toronto"
-  scan_times_local: ["10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00", "21:00", "22:00", "23:00"]
+  scan_times_local: ["10:00", "10:30", "11:00", "11:30", "12:00", "12:30", "13:00", "13:30", "14:00", "14:30", "15:00", "15:30", "16:00", "16:30", "17:00", "17:30", "18:00", "18:30", "19:00", "19:30", "20:00", "20:30", "21:00", "21:30", "22:00", "22:30", "23:00", "23:30"]
   scan_window_minutes: 30
 
   # Adaptive re-alert cooldown tiers, keyed by hours-to-commence -> minimum minutes between
