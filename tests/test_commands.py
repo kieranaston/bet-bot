@@ -267,6 +267,29 @@ def test_settle_loss_updates_bankroll():
         assert s.get(Alert, alert_id).status == "settled_loss"
 
 
+def test_settle_win_works_for_player_props():
+    """/settle takes the outcome directly from the user and never calls
+    settlement.grade_alert() -- unlike auto-settlement, it doesn't need a market-specific
+    grading rule, so it already works for player props with no code change. This locks
+    that in as a regression test."""
+    db = _db()
+    settings = _fake_settings(starting_bankroll=1000.0)
+    telegram = _fake_telegram()
+    odds_client = _fake_odds_client()
+    alert_id = _insert_alert(
+        db, status="placed", placed_stake=25.0, book_odds=1.91, market="batter_hits",
+        outcome_name="Over", point=1.5, participant="Fernando Tatis Jr.",
+    )
+
+    reply = commands._dispatch(db, settings, telegram, odds_client, f"/settle {alert_id} win")
+
+    assert reply == f"Settled #{alert_id} as WIN: +22.75. Bankroll now $1,022.75"
+    with db.session() as s:
+        alert = s.get(Alert, alert_id)
+        assert alert.status == "settled_win"
+        assert alert.participant == "Fernando Tatis Jr."
+
+
 def test_status_no_open_bets():
     db = _db()
     settings = _fake_settings()

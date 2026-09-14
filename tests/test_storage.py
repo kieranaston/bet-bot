@@ -1,6 +1,7 @@
 import datetime as dt
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from betbot.storage import Alert, Database, american_odds
 
@@ -39,6 +40,59 @@ def test_alert_book_odds_display_uses_american_odds():
         recommended_stake=0.0,
     )
     assert alert.book_odds_display() == "+150"
+
+
+def _prop_alert_kwargs(**overrides) -> dict:
+    defaults = dict(
+        event_id="e1", sport_key="basketball_nba", commence_time=dt.datetime.now(dt.timezone.utc),
+        home_team="H", away_team="A", market="player_points", outcome_name="Over", point=24.5,
+        bookmaker_key="bet99_ca_on", book_odds=2.0, sharp_book_key="fanduel,draftkings",
+        true_prob=0.5, ev_pct=5.0, recommended_stake=10.0,
+    )
+    defaults.update(overrides)
+    return defaults
+
+
+def test_alert_participant_defaults_to_empty_string_for_team_markets():
+    db = Database("sqlite:///:memory:")
+    with db.session() as s:
+        alert = Alert(
+            event_id="e1", sport_key="s", commence_time=dt.datetime.now(dt.timezone.utc),
+            home_team="H", away_team="A", market="h2h", outcome_name="H",
+            bookmaker_key="b", book_odds=2.0, sharp_book_key="pinnacle",
+            true_prob=0.5, ev_pct=5.0, recommended_stake=10.0,
+        )
+        s.add(alert)
+        s.flush()
+        alert_id = alert.id
+    with db.session() as s:
+        assert s.get(Alert, alert_id).participant == ""
+
+
+def test_alert_outcome_display_prefixes_participant_for_props():
+    alert = Alert(**_prop_alert_kwargs(participant="P. Mahomes"))
+    assert alert.outcome_display() == "P. Mahomes Over 24.5"
+
+
+def test_alert_uniqueness_allows_different_participants_same_line():
+    """Two different players sharing an otherwise-identical (event, market, outcome,
+    point, bookmaker) must both be storable -- this is exactly why `participant` is part
+    of uq_alert_identity, not just outcome_name/point."""
+    db = Database("sqlite:///:memory:")
+    with db.session() as s:
+        s.add(Alert(**_prop_alert_kwargs(participant="Player A")))
+        s.add(Alert(**_prop_alert_kwargs(participant="Player B")))
+    with db.session() as s:
+        assert s.query(Alert).count() == 2
+
+
+def test_alert_uniqueness_still_rejects_true_duplicate():
+    db = Database("sqlite:///:memory:")
+    with db.session() as s:
+        s.add(Alert(**_prop_alert_kwargs(participant="Player A")))
+    with pytest.raises(IntegrityError):
+        with db.session() as s:
+            s.add(Alert(**_prop_alert_kwargs(participant="Player A")))
 
 
 def test_datetime_columns_stay_timezone_aware_through_sqlite():

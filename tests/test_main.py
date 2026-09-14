@@ -1,7 +1,14 @@
 import datetime as dt
 from unittest.mock import MagicMock
 
-from betbot.main import process_event
+import pytest
+
+from betbot.main import (
+    _devig_spread_alternates,
+    _events_within_pregame_window,
+    process_event,
+    process_prop_event,
+)
 from betbot.storage import Alert, Database
 
 
@@ -18,6 +25,10 @@ def _event(bookmakers: list[dict], hours_to_commence: float = 3.0) -> dict:
 
 def _bookmaker(key: str, outcomes: list[dict]) -> dict:
     return {"key": key, "markets": [{"key": "h2h", "outcomes": outcomes}]}
+
+
+def _prop_bookmaker(key: str, market_key: str, outcomes: list[dict]) -> dict:
+    return {"key": key, "markets": [{"key": market_key, "outcomes": outcomes}]}
 
 
 def test_process_event_alerts_only_the_best_priced_book_for_the_same_outcome():
@@ -120,3 +131,173 @@ def test_process_event_filters_out_extreme_longshots():
         alerts = s.query(Alert).all()
         assert len(alerts) == 1
         assert alerts[0].outcome_name == "Home Team"
+
+
+def test_process_prop_event_keeps_different_players_separate():
+    """Two different players sharing the identical Over/line/book must both alert, not
+    collide into one -- regression for the participant-aware dedup key
+    (storage.Alert.uq_alert_identity)."""
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    market_key = "player_points"
+
+    def outcomes_for(player: str, point: float) -> list[dict]:
+        return [
+            {"name": "Over", "point": point, "price": 1.91, "description": player},
+            {"name": "Under", "point": point, "price": 1.91, "description": player},
+        ]
+
+    fanduel = _prop_bookmaker(
+        "fanduel", market_key, outcomes_for("Player A", 24.5) + outcomes_for("Player B", 18.5)
+    )
+    draftkings = _prop_bookmaker(
+        "draftkings", market_key, outcomes_for("Player A", 24.5) + outcomes_for("Player B", 18.5)
+    )
+    ontario = _prop_bookmaker(
+        "bet99_ca_on",
+        market_key,
+        [
+            {"name": "Over", "point": 24.5, "price": 2.30, "description": "Player A"},
+            {"name": "Over", "point": 18.5, "price": 2.30, "description": "Player B"},
+        ],
+    )
+    event = _event([fanduel, draftkings, ontario])
+
+    sent = process_prop_event(
+        db, telegram, event, "basketball_nba", [market_key],
+        bankroll=1000.0, now=dt.datetime.now(dt.timezone.utc),
+    )
+
+    assert sent == 2
+    with db.session() as s:
+        alerts = {a.participant: a for a in s.query(Alert).all()}
+        assert set(alerts) == {"Player A", "Player B"}
+        assert all(a.market == market_key for a in alerts.values())
+        assert all(a.sharp_book_key == "draftkings,fanduel" for a in alerts.values())
+
+
+def test_process_prop_event_requires_min_consensus_books():
+    """Only one consensus book quoting a line -- even at a huge apparent price -- must not
+    alert, since a single book's price isn't a consensus
+    (config/bookmakers.yaml consensus.min_books_required)."""
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    market_key = "player_points"
+
+    fanduel = _prop_bookmaker(
+        "fanduel",
+        market_key,
+        [
+            {"name": "Over", "point": 24.5, "price": 1.91, "description": "Player A"},
+            {"name": "Under", "point": 24.5, "price": 1.91, "description": "Player A"},
+        ],
+    )
+    ontario = _prop_bookmaker(
+        "bet99_ca_on", market_key,
+        [{"name": "Over", "point": 24.5, "price": 3.00, "description": "Player A"}],
+    )
+    event = _event([fanduel, ontario])
+
+    sent = process_prop_event(
+        db, telegram, event, "basketball_nba", [market_key],
+        bankroll=1000.0, now=dt.datetime.now(dt.timezone.utc),
+    )
+
+    assert sent == 0
+
+
+def _iso(offset_hours: float) -> str:
+    return (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=offset_hours)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def test_events_within_pregame_window_filters_far_out_and_started_events():
+    """Only games within `pregame_window_hours` of commence_time (and not yet started)
+    should be scanned -- this is what replaced the old fixed twice-daily schedule, since
+    these books open props/alternates close to kickoff, not gradually."""
+    now = dt.datetime.now(dt.timezone.utc)
+    events = [
+        {"id": "already_started", "commence_time": _iso(-1.0)},
+        {"id": "well_within_window", "commence_time": _iso(0.5)},
+        {"id": "exactly_at_boundary", "commence_time": _iso(3.0)},
+        {"id": "just_outside_window", "commence_time": _iso(3.1)},
+    ]
+
+    result = _events_within_pregame_window(events, now, window_hours=3.0)
+
+    assert {e["id"] for e in result} == {"well_within_window", "exactly_at_boundary"}
+
+
+def test_devig_spread_alternates_pairs_by_point_negation():
+    """alternate_spreads pairs the two teams by NEGATED point (Cowboys -3.5 with Giants
+    +3.5), not matching point -- and must key the result by each side's own real signed
+    point, not the shared magnitude, or Cowboys(-3.5)/Cowboys(-7.0) would collide."""
+    pinnacle = _prop_bookmaker(
+        "pinnacle",
+        "alternate_spreads",
+        [
+            {"name": "Cowboys", "point": -3.5, "price": 2.00},
+            {"name": "Giants", "point": 3.5, "price": 1.87},
+            {"name": "Cowboys", "point": -7.0, "price": 3.20},
+            {"name": "Giants", "point": 7.0, "price": 1.40},
+        ],
+    )
+
+    lookup = _devig_spread_alternates(pinnacle, "alternate_spreads", "additive")
+
+    assert set(lookup) == {("Cowboys", -3.5), ("Giants", 3.5), ("Cowboys", -7.0), ("Giants", 7.0)}
+    assert lookup[("Cowboys", -3.5)] + lookup[("Giants", 3.5)] == pytest.approx(1.0)
+    assert lookup[("Cowboys", -7.0)] + lookup[("Giants", 7.0)] == pytest.approx(1.0)
+    assert lookup[("Cowboys", -3.5)] != lookup[("Cowboys", -7.0)]
+
+
+def test_devig_spread_alternates_skips_incomplete_magnitude():
+    """A magnitude with only one side quoted (the other team hasn't posted that line yet)
+    must be skipped, not guessed at or crashed on."""
+    pinnacle = _prop_bookmaker(
+        "pinnacle",
+        "alternate_spreads",
+        [{"name": "Cowboys", "point": -3.5, "price": 2.00}],
+    )
+
+    lookup = _devig_spread_alternates(pinnacle, "alternate_spreads", "additive")
+
+    assert lookup == {}
+
+
+def test_process_prop_event_game_alt_market_uses_main_ev_floor_not_props_floor():
+    """game_alt_markets devig against Pinnacle (a genuinely sharp book), so they should
+    clear at ev.min_ev_pct (2%), NOT the stricter props.min_ev_pct (5%) used for the
+    noisier multi-book player-prop consensus."""
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+
+    pinnacle = _prop_bookmaker(
+        "pinnacle",
+        "team_totals",
+        [
+            {"name": "Over", "point": 24.5, "price": 1.87, "description": "Home Team"},
+            {"name": "Under", "point": 24.5, "price": 2.05, "description": "Home Team"},
+        ],
+    )
+    ontario = _prop_bookmaker(
+        "bet99_ca_on", "team_totals",
+        [{"name": "Over", "point": 24.5, "price": 1.98, "description": "Home Team"}],
+    )
+    event = _event([pinnacle, ontario])
+
+    sent = process_prop_event(
+        db, telegram, event, "americanfootball_nfl", [],
+        bankroll=1000.0, now=dt.datetime.now(dt.timezone.utc),
+        game_alt_markets=["team_totals"],
+    )
+
+    assert sent == 1
+    with db.session() as s:
+        alert = s.query(Alert).one()
+        assert alert.participant == "Home Team"
+        assert alert.sharp_book_key == "pinnacle"
+        # EV here sits between the two floors (~3.6%) -- this only alerts if the game-alt
+        # path used ev.min_ev_pct (2.0), not props.min_ev_pct (5.0).
+        assert 2.0 <= alert.ev_pct < 5.0

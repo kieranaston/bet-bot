@@ -70,7 +70,7 @@ class Alert(Base):
     __tablename__ = "alerts"
     __table_args__ = (
         UniqueConstraint(
-            "event_id", "market", "outcome_name", "point", "bookmaker_key",
+            "event_id", "market", "outcome_name", "point", "bookmaker_key", "participant",
             name="uq_alert_identity",
         ),
     )
@@ -81,9 +81,16 @@ class Alert(Base):
     commence_time = Column(AwareDateTime, nullable=False)
     home_team = Column(String, nullable=False)
     away_team = Column(String, nullable=False)
-    market = Column(String, nullable=False)  # h2h | spreads | totals
+    market = Column(String, nullable=False)  # h2h | spreads | totals | player_* | batter_* | ...
     outcome_name = Column(String, nullable=False)
-    point = Column(Float, nullable=True)  # spread/total line, null for h2h
+    point = Column(Float, nullable=True)  # spread/total/prop line, null for h2h and Yes/No props
+    # Player name for prop markets, "" for team markets (h2h/spreads/totals). Deliberately
+    # not nullable: Postgres treats NULL != NULL in a unique constraint, which would
+    # silently stop enforcing uniqueness among all the (NULL-participant) team-market
+    # alerts sharing this row's other columns. "" behaves like any other equal value on
+    # both SQLite and Postgres, so the constraint below works the same as it always has for
+    # team markets, and correctly as intended for props.
+    participant = Column(String, nullable=False, default="")
     bookmaker_key = Column(String, nullable=False)
     book_odds = Column(Float, nullable=False)
     sharp_book_key = Column(String, nullable=False)
@@ -97,19 +104,29 @@ class Alert(Base):
     placed_stake = Column(Float, nullable=True)
     closing_odds = Column(Float, nullable=True)  # for CLV, filled in at /settle time
     profit = Column(Float, nullable=True)  # realized profit/loss once settled
+    # Set once `auto_settle_pending` sees this bet's event finish but can't grade the
+    # market itself (player props -- /scores never returns player-level box scores). Guards
+    # the one-time "needs manual /settle" nudge from re-sending every scan thereafter; see
+    # betbot.settlement.auto_settle_pending.
+    settlement_reminder_sent_at = Column(AwareDateTime, nullable=True)
 
     first_seen_at = Column(AwareDateTime, default=utcnow)
     last_alerted_at = Column(AwareDateTime, nullable=True)
     updated_at = Column(AwareDateTime, default=utcnow, onupdate=utcnow)
 
     def outcome_display(self) -> str:
-        """Outcome name with the spread/total line attached, e.g. "Bills -3.5" or
-        "Over 224.5" -- bare outcome_name for h2h, where there's no line to show."""
+        """Outcome name with the spread/total/prop line attached, e.g. "Bills -3.5" or
+        "Over 224.5", prefixed with the player name for props (e.g. "P. Mahomes Over
+        274.5") -- bare outcome_name for h2h, where there's no line to show. This is the
+        one place every caller (Telegram alerts, /status, the daily report) renders an
+        outcome, so nothing else needs to know about participant/point formatting."""
         if self.market == "spreads" and self.point is not None:
-            return f"{self.outcome_name} {self.point:+g}"
-        if self.market == "totals" and self.point is not None:
-            return f"{self.outcome_name} {self.point:g}"
-        return self.outcome_name
+            base = f"{self.outcome_name} {self.point:+g}"
+        elif self.point is not None:  # totals, and Over/Under player props
+            base = f"{self.outcome_name} {self.point:g}"
+        else:
+            base = self.outcome_name  # h2h, and Yes/No player props (e.g. anytime TD)
+        return f"{self.participant} {base}" if self.participant else base
 
     def book_odds_display(self) -> str:
         """book_odds formatted as American odds (e.g. "+150", "-110") for display only --

@@ -44,9 +44,12 @@ class Secrets:
             odds_api_key=os.environ["ODDS_API_KEY"],
             telegram_bot_token=os.environ["TELEGRAM_BOT_TOKEN"],
             telegram_chat_id=os.environ["TELEGRAM_CHAT_ID"],
-            # Defaults to a local sqlite file so the bot works out of the box for local/VPS
-            # runs. For GitHub Actions you MUST set this to a hosted DB (e.g. Supabase
-            # Postgres) since the runner's disk doesn't persist between runs.
+            # Defaults to a local sqlite file -- the VPS is the only real deployment as of
+            # 2026-09-13 (Supabase/Postgres was dropped, see README's GitHub Actions backup
+            # section), so this default is what's actually used in production, not just local
+            # dev. A DATABASE_URL would still need to point at a hosted, persistent DB (e.g.
+            # Postgres) if the GitHub Actions backup path is ever revived, since that runner's
+            # disk doesn't persist between runs -- but nothing is configured for that today.
             database_url=os.environ.get("DATABASE_URL")
             or f"sqlite:///{REPO_ROOT / 'data' / 'betbot.db'}",
         )
@@ -124,6 +127,34 @@ class Settings:
         return float(self._raw["scheduling"]["max_hours_ahead"])
 
     @property
+    def props_scan_times_local(self) -> list[str]:
+        return list(self._raw["props"]["scan_times_local"])
+
+    @property
+    def props_scan_window_minutes(self) -> int:
+        return int(self._raw["props"]["scan_window_minutes"])
+
+    @property
+    def props_min_ev_pct(self) -> float:
+        return float(self._raw["props"]["min_ev_pct"])
+
+    @property
+    def props_max_hours_ahead(self) -> float:
+        return float(self._raw["props"]["max_hours_ahead"])
+
+    @property
+    def props_pregame_window_hours(self) -> float:
+        """The real cost/relevance filter for additional-markets scans: only fetch
+        per-event odds for events within this many hours of commence_time -- see the
+        comment above config/settings.yaml's `props:` section for why (these books open
+        props/alternates close to kickoff, not gradually)."""
+        return float(self._raw["props"]["pregame_window_hours"])
+
+    @property
+    def props_max_events_per_scan_per_sport(self) -> int:
+        return int(self._raw["props"]["max_events_per_scan_per_sport"])
+
+    @property
     def daily_report_time_local(self) -> str:
         return str(self._raw["reporting"]["time_local"])
 
@@ -140,6 +171,14 @@ class Settings:
         return list(self._bookmakers["sharp"]["known_keys"])
 
     @property
+    def consensus_book_keys(self) -> list[str]:
+        return list(self._bookmakers["consensus"]["known_keys"])
+
+    @property
+    def min_consensus_books(self) -> int:
+        return int(self._bookmakers["consensus"]["min_books_required"])
+
+    @property
     def ontario_known_keys(self) -> list[str]:
         return list(self._bookmakers["ontario"]["known_keys"])
 
@@ -149,6 +188,14 @@ class Settings:
         Pinnacle + our confirmed Ontario books. 7 keys total (<=10), confirmed by The Odds
         API docs to price as 1 region-equivalent instead of 2 (eu + ca)."""
         return ",".join(self.sharp_book_keys + self.ontario_known_keys)
+
+    @property
+    def props_bookmakers(self) -> str:
+        """Comma-separated bookmaker keys for per-event odds calls: Pinnacle (sharp
+        reference for `game_alt_markets:`) + consensus books (config/bookmakers.yaml
+        `consensus:`, reference for `player_markets:`) + our confirmed Ontario books. 10
+        keys total (<=10), same 1-region-equivalent pricing as scan_bookmakers."""
+        return ",".join(self.sharp_book_keys + self.consensus_book_keys + self.ontario_known_keys)
 
     @property
     def ontario_auto_match_suffixes(self) -> list[str]:
@@ -164,7 +211,7 @@ class Settings:
     def display_name(self, bookmaker_key: str) -> str:
         """Human-readable book name for Telegram alerts, falling back to the raw API key
         if it's somehow not in our (deliberately closed) allowlist yet."""
-        for group in ("sharp", "ontario"):
+        for group in ("sharp", "consensus", "ontario"):
             name = self._bookmakers[group].get("display_names", {}).get(bookmaker_key)
             if name:
                 return name

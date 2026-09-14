@@ -11,6 +11,26 @@ sharp:
   display_names:
     pinnacle: Pinnacle
 
+consensus:
+  # Player props have no Pinnacle line to devig against (Pinnacle doesn't reliably post US
+  # player props -- see the comment above `sports:` in config/settings.yaml), so for props
+  # only, the "sharp" reference is a multi-book average of these high-volume US books'
+  # no-vig implied probabilities instead of a single sharp book. None of these keys overlap
+  # ontario.known_keys below (betmgm here is the US key, distinct from betmgm_ca_on) --
+  # confirmed no self-comparison risk. Live-verify via scripts/list_event_markets.py before
+  # trusting these keys, same as every other bookmaker list in this file.
+  known_keys:
+    - fanduel
+    - draftkings
+    - betmgm
+  # Require at least this many of the books above to have posted a line before treating the
+  # average as trustworthy -- a single book's price is not a consensus.
+  min_books_required: 2
+  display_names:
+    fanduel: FanDuel
+    draftkings: DraftKings
+    betmgm: BetMGM
+
 ontario:
   # Region: ca. Confirmed exact list -- do not add books here without explicit sign-off.
   known_keys:

@@ -13,25 +13,77 @@ bankroll:
 ev:
   min_ev_pct: 2.0               # only alert when EV >= this percent
   # Floor on the devigged true (fair) win probability -- EV% alone doesn't capture
-  # variance, and devig error is proportionally larger at the tails (a given probability
-  # miscalibration matters much more at 8% than at 40%), so extreme-longshot "+EV" bets are
-  # both higher-variance and less trustworthy than they look. 0.25 excludes anything with
-  # fair odds longer than about +300 American; doesn't affect favorites, only longshots.
+  # variance, and even the improved devig below is less trustworthy the further a line
+  # sits from a pick'em (thinner liquidity, more room for a book's own pricing noise), so
+  # extreme-longshot "+EV" bets are both higher-variance and less trustworthy than they
+  # look. 0.25 excludes anything with fair odds longer than about +300 American; doesn't
+  # affect favorites, only longshots.
   min_true_prob: 0.25
-  # Devig method for turning sharp two-way odds into "true" probabilities.
-  # "multiplicative" (basic proportional devig) is the only one implemented in v1.
-  devig_method: multiplicative
+  # Devig method for turning sharp odds into "true" probabilities. "additive" is what
+  # `betbot.devig` actually implements for the two-outcome case (moneyline, spreads,
+  # totals, all player props, all alternate-line markets): true_prob_i = implied_i -
+  # (sum(implied) - 1) / n. This is mathematically equivalent to Shin's method for
+  # exactly two outcomes -- it corrects for favorite-longshot bias (bookmakers price
+  # relatively more vig into longshots than favorites), which plain proportional
+  # ("multiplicative") devig ignores. Switched from multiplicative 2026-09-13 after
+  # verifying the 2-outcome equivalence and safety (provably can't go negative for n=2)
+  # against the Shin-method literature, not just from memory. `devig.devig()`
+  # automatically falls back to multiplicative for markets with more than two outcomes
+  # (soccer's 3-way h2h) -- the equivalence/safety proof doesn't extend there.
+  devig_method: additive
 
 sports:
   # The Odds API sport keys. Main markets only for v1 (moneyline / spread / totals).
   - key: americanfootball_nfl
     markets: [h2h, spreads, totals]
+    # NO player_markets here -- live-verified 2026-09-13 against ALL 32 standard NFL
+    # player-prop market keys (the full docs list, not a guessed subset): zero of the 6
+    # Ontario books posted ANY of them for either of the next two NFL games, including one
+    # just 1.6h from kickoff (too close for this to be a "not posted yet" timing issue).
+    # The per-event odds call still costs real credits whenever the consensus side
+    # (FanDuel/DraftKings) has data, even with nothing on the Ontario side to alert
+    # against -- so this was pure wasted spend, not a free no-op. Re-check
+    # scripts/list_event_markets.py americanfootball_nfl periodically in case an Ontario
+    # book adds NFL props later in the season before re-enabling.
+    #
+    # game_alt_markets (added 2026-09-13) are a DIFFERENT category from player_markets --
+    # game-level alternate lines (many spread/total points per game, not per player), and
+    # unlike player props, Pinnacle actually prices these, so they devig against Pinnacle
+    # alone (see main.py::process_prop_event), not the FanDuel/DraftKings/BetMGM consensus.
+    # This exact list is what Pinnacle was confirmed to carry for NFL live 2026-09-13 --
+    # NOT alternate_team_totals, which Pinnacle didn't have for the checked game. Ontario
+    # coverage confirmed too: Sports Interaction had all 3, BetMGM Ontario 2, Bet99 1.
+    game_alt_markets: [alternate_spreads, alternate_totals, team_totals]
   - key: basketball_nba
     markets: [h2h, spreads, totals]
+    # player_markets kept configured despite being unverified: season doesn't start until
+    # 2026-10-20 (confirmed live, 0 events in the next 45 days as of 2026-09-13), so the
+    # free /events precheck in run_props_scan skips it at zero cost until then -- costs
+    # nothing to leave in place, but re-run scripts/list_event_markets.py once games exist
+    # before trusting Ontario coverage exists (NFL's lesson: don't assume from main-market
+    # coverage that props coverage follows).
+    player_markets: [player_points, player_rebounds, player_assists, player_threes, player_points_rebounds_assists, player_double_double]
   - key: icehockey_nhl
     markets: [h2h, spreads, totals]
   - key: baseball_mlb
     markets: [h2h, spreads, totals]
+    # The ONLY sport live-verified (2026-09-13) to have real Ontario-side player-prop
+    # coverage. This list is every standard MLB market (of 20 checked -- the full docs
+    # list, not a guessed subset) where BOTH sides actually have it on a real game:
+    # >=2 of {fanduel, draftkings, betmgm} post it (consensus.min_books_required) AND at
+    # least one of betmgm_ca_on/sportsinteraction_ca_on posts it. batter_walks and
+    # pitcher_walks were dropped despite Ontario coverage -- only 1 consensus book (DraftKings)
+    # posts either, short of min_books_required. batter_home_runs/batter_triples/
+    # batter_first_home_run/batter_fantasy_score/pitcher_record_a_win were dropped: no
+    # Ontario coverage, or <2 consensus books. Re-check scripts/list_event_markets.py
+    # baseball_mlb if adjusting this list, and note the MLB season is winding down
+    # (playoffs soon) -- re-verify next season.
+    player_markets: [batter_hits, batter_rbis, batter_total_bases, batter_doubles, batter_singles, batter_runs_scored, batter_hits_runs_rbis, batter_stolen_bases, pitcher_strikeouts, pitcher_outs, pitcher_earned_runs, pitcher_hits_allowed]
+    # Pinnacle carries all 4 game-level alternate markets for MLB (live-verified
+    # 2026-09-13), and both prop-carrying Ontario books (BetMGM Ontario, Sports
+    # Interaction) do too -- devigged against Pinnacle alone, same as game_alt_markets on
+    # the NFL entry above, not the player-props consensus.
+    game_alt_markets: [alternate_spreads, alternate_totals, team_totals, alternate_team_totals]
   # Added to use more of a 20,000/month Odds API quota (previous 4 sports cost ~1,080/month)
   # while staying on markets/leagues where Pinnacle is still a liquid, sharp reference --
   # deliberately not extended to player props or thin/niche leagues (see chat -- Pinnacle's
@@ -89,12 +141,12 @@ odds_api:
   base_url: "https://api.the-odds-api.com/v4"
 
 scheduling:
-  # We spend Odds API credits every 30 min, 10am-11:30pm Eastern (your stated
-  # waking/actionable hours) -- checked in real Eastern clock time (DST-aware via
-  # zoneinfo). `scan_window_minutes` is set to exactly match this 30-min slot spacing: at
-  # the boundary between two slots (e.g. exactly 10:30:00), the elapsed-minutes check for
-  # the earlier slot is `30 < 30` (False, correctly excluded) while the later slot's check
-  # is `0 <= 0 < 30` (True) -- so adjacent windows abut with zero gap and zero overlap.
+  # We spend Odds API credits hourly, 10am-11pm Eastern (your stated waking/actionable
+  # hours) -- checked in real Eastern clock time (DST-aware via zoneinfo).
+  # `scan_window_minutes` is set to exactly match this 60-min slot spacing: at the boundary
+  # between two slots (e.g. exactly 11:00:00), the elapsed-minutes check for the earlier
+  # slot is `60 < 60` (False, correctly excluded) while the later slot's check is
+  # `0 <= 0 < 60` (True) -- so adjacent windows abut with zero gap and zero overlap.
   #
   # Deliberately NOT round-the-clock: earlier reasoning favored even spacing so Pinnacle's
   # overnight-ET soccer activity (European business hours) wouldn't be missed, but an alert
@@ -103,16 +155,18 @@ scheduling:
   # line happens to be most active. Overnight soccer mispricings are simply not caught by
   # this schedule; that's an accepted, deliberate tradeoff, not an oversight.
   #
-  # 28 scans/day deliberately targets a high fraction of the monthly budget (per your
-  # request), not just "more scans than before": at ~22 credits/scan worst-case (12
-  # sports' markets x 1 region-equivalent, every sport with a live game), that's
-  # ~18,480 credits/month -- ~92% of a 20,000/month plan. Realistic days come in lower
-  # (NBA/NHL etc. often have no upcoming game and skip their paid call for free -- actual
-  # logged scans have cost as little as 16 credits), giving a natural safety margin
-  # against ever exceeding the plan without needing to budget for it explicitly.
+  # Cut back from 28 scans/day (every 30 min) to 14 (hourly) on 2026-09-13 to fund player
+  # props (see `props:` below) within the same 20,000/month plan, rather than raising the
+  # budget -- a lot of the extra 30-min scans weren't finding anything above the EV
+  # threshold anyway, so the marginal value of that frequency was low. At ~22 credits/scan
+  # worst-case (12 sports' markets x 1 region-equivalent, every sport with a live game),
+  # that's ~9,240 credits/month for main markets (~46% of plan) -- see `props:` below for
+  # the rest of the budget. Realistic days come in lower (NBA/NHL etc. often have no
+  # upcoming game and skip their paid call for free -- actual logged scans have cost as
+  # little as 16 credits), giving a natural safety margin.
   timezone: "America/Toronto"
-  scan_times_local: ["10:00", "10:30", "11:00", "11:30", "12:00", "12:30", "13:00", "13:30", "14:00", "14:30", "15:00", "15:30", "16:00", "16:30", "17:00", "17:30", "18:00", "18:30", "19:00", "19:30", "20:00", "20:30", "21:00", "21:30", "22:00", "22:30", "23:00", "23:30"]
-  scan_window_minutes: 30
+  scan_times_local: ["10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00", "21:00", "22:00", "23:00"]
+  scan_window_minutes: 60
 
   # Adaptive re-alert cooldown tiers, keyed by hours-to-commence -> minimum minutes between
   # re-alerting the *same* (event, market, bookmaker, outcome) unless the price moves. These
@@ -134,6 +188,55 @@ scheduling:
   # Don't bother processing events further out than this -- lines aren't liquid/final yet
   # and re-checking them wastes API credits.
   max_hours_ahead: 168   # 7 days
+
+props:
+  # Additional per-event markets (config `sports:` entries' `player_markets:` and
+  # `game_alt_markets:`) are gated by their own scan window -- independent of
+  # `scheduling.scan_times_local` above -- because they're fetched one event at a time (see
+  # betbot.odds_client.get_event_odds), a fundamentally different and more expensive cost
+  # shape than the bulk /odds call main markets use.
+  #
+  # Redesigned 2026-09-13 from a twice-daily fixed schedule to proximity-based scanning,
+  # after live-checking 6 upcoming MLB games: the one <0.2h from kickoff had full prop
+  # coverage on both the consensus AND Ontario sides; the other 5 (23-25h out) had ZERO
+  # props from any book at all, consensus included. These books open props close to
+  # kickoff, not gradually like main markets -- a twice-a-day fixed check reliably misses
+  # that narrow window for any given game. `pregame_window_hours` below is the fix: only
+  # fetch a given event once it's actually close to starting. This only works cheaply
+  # because an empty response (nothing from ANY requested book) costs 0 credits regardless
+  # of how many markets/events are checked -- so checking a far-out game costs nothing, and
+  # checking a near-kickoff game costs something only once real data actually exists there,
+  # which is exactly when we want to be looking.
+  scan_times_local: ["10:00", "10:15", "10:30", "10:45", "11:00", "11:15", "11:30", "11:45", "12:00", "12:15", "12:30", "12:45", "13:00", "13:15", "13:30", "13:45", "14:00", "14:15", "14:30", "14:45", "15:00", "15:15", "15:30", "15:45", "16:00", "16:15", "16:30", "16:45", "17:00", "17:15", "17:30", "17:45", "18:00", "18:15", "18:30", "18:45", "19:00", "19:15", "19:30", "19:45", "20:00", "20:15", "20:30", "20:45", "21:00", "21:15", "21:30", "21:45", "22:00", "22:15", "22:30", "22:45", "23:00"]
+  scan_window_minutes: 15
+  # THE real cost control now (replaces the old max_hours_ahead-as-filter approach): only
+  # fetch per-event odds for games within this many hours of commence_time. A game gets
+  # re-checked roughly every 15 min once inside this window -- free until real data
+  # appears, then costs credits for however many checks remain until kickoff, so keep this
+  # tight rather than generous.
+  pregame_window_hours: 3
+  # Outer safety bound only now -- pregame_window_hours above does the real filtering.
+  max_hours_ahead: 48
+  # Hard safety ceiling so one heavy game day (e.g. a busy MLB slate) can't blow the
+  # monthly budget in a single scan even with pregame_window_hours filtering -- events are
+  # processed in commence-time order, nearest first.
+  max_events_per_scan_per_sport: 8
+  # Higher bar than ev.min_ev_pct (2.0): PLAYER props' "true" line is an average across
+  # non-Ontario US books (config/bookmakers.yaml `consensus:`), not Pinnacle -- a noisier
+  # reference than a genuinely sharp book, so expect a higher false-positive rate at the
+  # same EV% and compensate with a higher floor. Does NOT apply to `game_alt_markets:` --
+  # those devig against Pinnacle directly (same as main markets) and use ev.min_ev_pct
+  # (2.0) instead, since that reference is just as sharp as any main-market alert's.
+  min_ev_pct: 5.0
+  # Cost estimate: genuinely harder to pin to one ceiling number than the old fixed-slot
+  # schedule, since it now depends on how game start-times cluster within
+  # pregame_window_hours rather than a flat scans/day x markets formula. Launch with these
+  # conservative defaults (3h window, 15-min cadence) and tune both against `/quota` after
+  # a few real days, same as scheduling.scan_times_local was originally tuned from real
+  # usage rather than a worst-case guess. `game_alt_markets:` (baseball_mlb: 3 markets,
+  # americanfootball_nfl: 3 markets) are combined into the SAME per-event odds call as
+  # `player_markets:` for a given event -- cost is per unique market returned, not per
+  # category, so this doesn't double the number of API calls.
 
 reporting:
   # Daily digest send time, checked the same DST-aware way as scheduling.scan_times_local

@@ -16,18 +16,19 @@ is the primary deployment.
    the VPS. Each iteration polls Telegram for new commands (`/placed`, `/skip`, `/settle`,
    `/scan`, etc.) — that's free, so this stays responsive between real scans — then checks
    whether it's time to actually spend Odds API credits.
-2. Real scans only happen every 30 minutes, 10am-11:30pm Eastern (28x/day), configurable
-   via `config/settings.yaml` `scheduling.scan_times_local` — checked in real, DST-aware
-   Eastern clock time via `betbot.scheduler.is_scan_time`, not a fixed UTC cron, so it stays
-   correct across daylight saving changes. Since the poll loop ticks far more often than
-   that, `betbot.scheduler.current_scan_window_key` + a `last_scan_window` marker in the
-   database make sure each 30-minute window is only actually scanned once, not once per
-   ~20s poll. Deliberately restricted to waking/actionable hours rather than round-the-clock
-   — an alert at 3am ET is useless if you're asleep and can't act on it before the price
-   moves, even though Pinnacle's soccer lines are most active overnight (European business
-   hours). Overnight soccer mispricings are a known, accepted gap in this schedule. The
-   28x/day cadence is a deliberate choice to use a high fraction of the monthly Odds API
-   budget (not just "more than before") — see the cost breakdown below.
+2. Real scans for main markets (h2h/spreads/totals) happen hourly, 10am-11pm Eastern
+   (14x/day), configurable via `config/settings.yaml` `scheduling.scan_times_local` —
+   checked in real, DST-aware Eastern clock time via `betbot.scheduler.is_scan_time`, not a
+   fixed UTC cron, so it stays correct across daylight saving changes. Since the poll loop
+   ticks far more often than that, `betbot.scheduler.current_scan_window_key` + a
+   `last_scan_window` marker in the database make sure each hourly window is only actually
+   scanned once, not once per ~20s poll. Deliberately restricted to waking/actionable hours
+   rather than round-the-clock — an alert at 3am ET is useless if you're asleep and can't
+   act on it before the price moves, even though Pinnacle's soccer lines are most active
+   overnight (European business hours). Overnight soccer mispricings are a known, accepted
+   gap in this schedule. Cut back from 28x/day (every 30 min) on 2026-09-13 to fund player
+   props (step 5 below) within the same Odds API plan, rather than raising the budget — a
+   lot of the extra 30-min scans weren't finding anything above the EV threshold anyway.
 3. Per sport, it first hits the free `/events` endpoint to check whether anything's even
    upcoming, skipping the odds call entirely if not (an empty `/odds` response also costs
    0 credits per the docs, so this mainly saves a round-trip rather than credits). Otherwise
@@ -37,12 +38,11 @@ is the primary deployment.
    [The Odds API](https://the-odds-api.com/) via `bookmakers=` — Pinnacle + your 6 Ontario
    books, 7 keys total. The Odds API's docs confirm "every group of 10 bookmakers is the
    equivalent of 1 region," so our 7 books cost 1 region-equivalent instead of the 2 regions
-   `regions=eu,ca` would need for the same data. That's roughly 18,480 credits/month
-   worst-case at 28 scans/day (~92% of a 20,000/month plan; realistic days come in lower
+   `regions=eu,ca` would need for the same data. That's roughly 9,240 credits/month
+   worst-case at 14 scans/day (~46% of a 20,000/month plan; realistic days come in lower
    since sports with no live game skip their paid call for free) — sized to stay on
-   markets/leagues where
-   Pinnacle is still a sharp, liquid reference, deliberately not extended to player props or
-   thin/niche leagues where "true odds" would be less trustworthy. The h2h-only restriction
+   markets/leagues where Pinnacle is still a sharp, liquid reference. Player props (step 5
+   below) use the rest of the budget. The h2h-only restriction
    on CFL/MMA/soccer follows the docs' own caveat that "spreads and totals markets are mainly
    available for US sports and bookmakers" — since the plain `/odds` endpoint charges for
    every *requested* market regardless of whether any bookmaker actually returns data for it,
@@ -60,33 +60,69 @@ is the primary deployment.
    (free, no quota cost) to confirm a sport's current key before adding another one —
    tennis was left out here because the API has historically used per-tournament keys
    rather than one persistent `tennis_atp`/`tennis_wta` key.
-4. For each market, it devigs Pinnacle's two-way price into a true win probability
-   (`src/betbot/devig.py`), then checks every Ontario book's price against that true
-   probability (`src/betbot/ev.py`). If more than one Ontario book clears the bar for the
-   same outcome, only the single best-priced one is used -- otherwise the same bet showing
-   value at multiple books would each send their own alert, which reads as duplicate
-   notifications for one decision. To actually alert, a bet needs both EV at or above the
-   threshold in `config/settings.yaml` (default 2%) *and* a true (fair) win probability at
-   or above `ev.min_true_prob` (default 25%, i.e. no longer than roughly +300 American) --
-   high-EV longshots are both higher-variance and less trustworthy, since devig error grows
-   proportionally larger at the tails. Whatever survives both filters gets sized with
+4. For each market, it devigs Pinnacle's price into a true win probability
+   (`src/betbot/devig.py` -- `additive`, mathematically equivalent to Shin's method for
+   the two-outcome case, correcting for the favorite-longshot bias plain proportional
+   devig ignores; falls back to basic proportional `multiplicative` only for 3+ outcome
+   markets like soccer's 3-way h2h), then checks every Ontario book's price against that
+   true probability (`src/betbot/ev.py`). If more than one Ontario book clears the bar for
+   the same outcome, only the single best-priced one is used -- otherwise the same bet
+   showing value at multiple books would each send their own alert, which reads as
+   duplicate notifications for one decision. To actually alert, a bet needs both EV at or
+   above the threshold in `config/settings.yaml` (default 2%) *and* a true (fair) win
+   probability at or above `ev.min_true_prob` (default 25%, i.e. no longer than roughly
+   +300 American) -- high-EV longshots are both higher-variance and less trustworthy the
+   further a line sits from a pick'em. Whatever survives both filters gets sized with
    quarter-Kelly (`src/betbot/kelly.py`) against your current bankroll and sent to you on
    Telegram (odds shown in American format), including a direct bet-slip link when the book
    provides one (`includeLinks=true`).
-5. It won't spam you: each (event, market, outcome, line) combination is only re-alerted
-   after a cooldown that tightens as game time approaches, or immediately if the price
-   moves (`src/betbot/scheduler.py`, tunable in `config/settings.yaml`).
-6. Whenever a real scan happens, it also first auto-settles any bet you've logged as
+5. Two categories of "additional markets" (config `sports:` entries' `player_markets:` and
+   `game_alt_markets:`) run on their own schedule (`config/settings.yaml` `props:`), since
+   they aren't available on the bulk `/odds` endpoint at all -- they're fetched one event
+   at a time (`betbot.odds_client.get_event_odds`). This schedule is **proximity-based**,
+   not fixed daily times: live-checking 6 upcoming MLB games found these books post
+   props/alternates close to kickoff, not gradually like main markets (a game <0.2h from
+   first pitch had full coverage; games 23-25h out had zero, on the consensus side too) --
+   so it checks every ~15 min, 10am-11pm ET, but only actually fetches events within
+   `props.pregame_window_hours` (default 3h) of commence_time, capped at
+   `props.max_events_per_scan_per_sport` as a hard safety ceiling. This stays cheap because
+   an empty response (no book has data yet) costs 0 credits regardless of how often you
+   check.
+   - **Player props** (currently MLB and NBA): Pinnacle doesn't reliably price these, so
+     there's no single sharp book to devig against -- instead the "true" line is a
+     multi-book average of non-Ontario US books' no-vig probabilities
+     (`config/bookmakers.yaml` `consensus:` -- FanDuel, DraftKings, BetMGM by default,
+     requiring at least `min_books_required` of them to agree -- `betbot.devig.devig_consensus`)
+     against the same Ontario allowlist. That's a noisier reference than a genuinely sharp
+     book, so these use a higher EV floor (`props.min_ev_pct`, default 5% vs. main markets'
+     2%).
+   - **Game-level alternate lines** (currently NFL and MLB -- `alternate_spreads`,
+     `alternate_totals`, `team_totals`, `alternate_team_totals`): unlike player props,
+     Pinnacle actually prices these, so they devig against Pinnacle alone and use the
+     regular main-markets EV floor (2%), not the props one. `alternate_spreads` pairs its
+     two sides by **point negation** (e.g. a -3.5 favorite pairs with the +3.5 underdog,
+     not a matching point) rather than the equal-point pairing every other market in this
+     bot uses -- `betbot.main._devig_spread_alternates` handles that specifically.
+   - Run `scripts/list_event_markets.py <sport>` to live-verify which books are actually
+     quoting a sport's configured markets before trusting them -- it also prints the raw
+     ground-truth market list per Ontario book (`betbot.odds_client.get_event_markets`),
+     so you can tell "not supported" apart from "not posted yet."
+6. It won't spam you: each (event, market, outcome, line, participant) combination is only
+   re-alerted after a cooldown that tightens as game time approaches, or immediately if the
+   price moves (`src/betbot/scheduler.py`, tunable in `config/settings.yaml`).
+7. Whenever a real scan happens, it also first auto-settles any bet you've logged as
    `/placed` whose game has finished, using The Odds API's `/scores` endpoint (flat 2
    credits/request, only called for sports with something actually pending) —
    `src/betbot/settlement.py` grades moneyline/spread/total outcomes from the final score
-   and updates your bankroll automatically. You can still `/settle` manually any time if you
-   don't want to wait for the next scan window.
-7. Once a day, at `config/settings.yaml` `reporting.time_local`, it automatically sends a
+   and updates your bankroll automatically. `/scores` has no player-level box scores, so
+   player props can never auto-settle this way — `/settle <id> win|loss|push` is the only
+   way to grade those. You can also `/settle` any bet manually any time if you don't want
+   to wait for the next scan window.
+8. Once a day, at `config/settings.yaml` `reporting.time_local`, it automatically sends a
    digest to Telegram: bankroll, open bets, settled win/loss record, and ROI (same
    once-per-window dedup pattern as the scan gating, via a `last_daily_report_window`
    marker). `scripts/report.py` sends the same digest on demand if you want it sooner.
-8. You reply in Telegram:
+9. You reply in Telegram:
    - `/placed <id> [stake]` — log that you bet it (defaults to the suggested stake)
    - `/skip <id>` — dismiss it
    - `/settle <id> win|loss|push` — grade it manually; updates your bankroll
@@ -145,7 +181,7 @@ Telegram command to adjust it).
 
 Any small VPS works. A free-tier VM (e.g. Google Cloud's `e2-micro`, always-free in
 `us-west1`/`us-central1`/`us-east1`) is enough for this — the bot is lightweight and only
-does real work ~28x/day.
+does real work ~16x/day (14 main-market scans + 2 prop scans).
 
 1. Create an Ubuntu 24.04 VM and SSH into it.
 2. Install Docker and git:
@@ -225,6 +261,12 @@ python scripts/report.py  # send a daily-digest-style message on demand
 
 ## Backup: running via GitHub Actions
 
+**As of 2026-09-13, this path isn't set up and there's no active plan to use it** — the bot
+runs on the VPS only, against a local SQLite file there, and the Supabase project this section
+used to point `DATABASE_URL` at has been dropped. The instructions below are kept for
+reference in case this path is ever revived, but they'd need a fresh persistent DB (Supabase or
+otherwise) set up from scratch first — don't assume the old Supabase project still exists.
+
 `.github/workflows/betbot-scan.yml` and `daily_report.yml` can run the exact same code on
 GitHub's own schedulers instead of (or alongside) the VPS. **Both are currently disabled**
 (`gh workflow list --all` to check) — this repo found GitHub's native `schedule:` trigger
@@ -257,9 +299,9 @@ To use this path instead of (or in addition to) the VPS:
    `gh run list --workflow=betbot-scan.yml` before trusting it) — don't assume the old
    twice-hourly cadence works, since that's exactly what didn't.
 
-**Note on the two databases:** if you run the VPS (local SQLite) and GitHub Actions
-(Supabase Postgres) at different times, they track separate bankroll/bet histories — the
-data doesn't automatically sync between them.
+**Note on the two databases:** if you ever do set this path back up alongside the VPS, running
+both at different times means they'd track separate bankroll/bet histories — the data doesn't
+automatically sync between them.
 
 ## Project layout
 
@@ -279,7 +321,9 @@ src/betbot/
   performance.py          ROI / win-rate rollups, shared report-line builder
   main.py                 continuous-loop entry point: poll, gate, scan, settle, report
 scripts/
-  list_bookmakers.py      discovery helper for real bookmaker keys
+  list_bookmakers.py      discovery helper for real bookmaker keys (main markets)
+  list_event_markets.py   discovery helper for player props/game-alt markets (ground truth)
+  migrate_add_participant.py  one-time: adds Alert.participant to an existing DB
   init_db.py               creates tables / seeds bankroll
   report.py                manual on-demand daily-digest sender
 .github/workflows/
@@ -291,11 +335,26 @@ Dockerfile                 how the VPS runs the bot (continuous poll loop)
 
 ## Known limitations (v1)
 
-- Devig uses the basic multiplicative method, not Shin's method — fine for liquid
-  two-way markets (moneyline/spread/totals), which is all this targets.
-- No player props (main markets only), per initial scope — also a poor cost/quality
-  trade-off: props require a per-event API call instead of one bulk call per sport, and
-  Pinnacle is less liquid/reliable there as a "true odds" reference.
+- Devig uses `additive` (Shin-equivalent for exactly two outcomes, since 2026-09-13),
+  falling back to basic `multiplicative` only for 3+ outcome markets (soccer's 3-way h2h)
+  — no genuine N>2 Shin's method is implemented.
+- Player props are limited to MLB and NBA (`config/settings.yaml` `sports:` entries'
+  `player_markets:`) and a modest starting market list, since each additional sport/market
+  adds real per-event API cost (see step 5 above) — NFL was tried and dropped 2026-09-13
+  after live-verifying that none of the 6 Ontario books post any NFL player prop right now
+  (checked as close as 1.6h before kickoff — not a timing issue), alongside the same result
+  for NCAAF, CFL, and all 5 configured soccer leagues. MLB was the only sport found with
+  real Ontario-side prop coverage (BetMGM Ontario, Sports Interaction). NFL's main markets
+  still get `game_alt_markets:` (alternate spreads/totals/team totals), a different
+  category devigged against Pinnacle instead — see step 5 above. Re-verify with
+  `scripts/list_event_markets.py` before re-adding any of those — the per-event odds call
+  costs real credits whenever the consensus side has data, even with nothing to alert on
+  the Ontario side, so this isn't free to leave on speculatively.
+- The multi-book consensus used for props (FanDuel/DraftKings/BetMGM average) is a noisier
+  "true odds" reference than Pinnacle — none of these are genuinely sharp books, just
+  high-volume ones — so expect a higher false-positive rate than main markets even with
+  the higher `props.min_ev_pct` floor. Worth tracking props' realized ROI separately from
+  main markets' once you have enough settled bets to compare.
 - No closing-line-value (CLV) tracking — considered and deliberately dropped, since it
   would require either extra API calls to snapshot the closing line or manual entry, and
   wasn't worth the added complexity for this use case.
@@ -303,9 +362,10 @@ Dockerfile                 how the VPS runs the bot (continuous poll loop)
   spreads/totals; if a book's line differs from Pinnacle's, that outcome is skipped rather
   than approximated.
 - Auto-settlement only checks games within `settlement.days_from` (2 days) of finishing,
-  and only runs alongside a real scan (every 30 min, 10am-11:30pm ET) — a bet finishing overnight
-  can sit unsettled until the next scan window catches it. `/settle` still works manually if
-  you don't want to wait.
+  and only runs alongside a main-market scan (hourly, 10am-11pm ET) — a bet finishing
+  overnight can sit unsettled until the next scan window catches it. It also only covers
+  h2h/spreads/totals: `/scores` has no player-level box scores, so player props can never
+  auto-settle and always need `/settle` manually.
 - Bookmaker homepage URLs in `config/bookmakers.yaml` (`homepage_urls`, used as the final
   deep-link fallback) are best-effort guesses, not verified against each book's actual
   current domain.
