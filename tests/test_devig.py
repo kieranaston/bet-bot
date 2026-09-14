@@ -111,3 +111,27 @@ def test_devig_consensus_meets_min_books_exactly():
     result = devig_consensus(per_book, min_books=2)
     assert result is not None
     assert len(result) == 2
+
+
+def test_devig_consensus_median_ignores_outlier_book():
+    # Two books agree closely, one is a wild outlier -- median should track the agreeing
+    # pair, not get dragged toward the outlier the way a mean would.
+    per_book = {
+        "fanduel": [1.91, 1.91],
+        "draftkings": [1.87, 1.95],
+        "outlier": [1.10, 9.00],
+    }
+    median_result = devig_consensus(per_book, min_books=2, aggregate="median")
+    mean_result = devig_consensus(per_book, min_books=2, aggregate="mean")
+    fanduel_prob = devig(per_book["fanduel"])[0]
+    draftkings_prob = devig(per_book["draftkings"])[0]
+    close_pair_avg = (fanduel_prob + draftkings_prob) / 2
+    assert median_result[0] == pytest.approx(close_pair_avg, abs=0.02)
+    assert abs(median_result[0] - close_pair_avg) < abs(mean_result[0] - close_pair_avg)
+
+
+def test_devig_consensus_defaults_to_mean():
+    per_book = {"fanduel": [1.91, 1.91], "draftkings": [1.83, 2.05]}
+    assert devig_consensus(per_book, min_books=2) == pytest.approx(
+        devig_consensus(per_book, min_books=2, aggregate="mean")
+    )

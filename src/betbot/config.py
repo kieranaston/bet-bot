@@ -89,6 +89,14 @@ class Settings:
         return str(self._raw["ev"]["devig_method"])
 
     @property
+    def sharp_max_staleness_minutes(self) -> float:
+        """How old Pinnacle's own last_update can be before betbot.matching.is_fresh treats
+        it as unusable and falls back to the consensus basket -- see the comment above this
+        key in config/settings.yaml for why (Pinnacle odds are scraped from Pinnacle's public
+        website, so gaps/staleness are an expected characteristic of the feed)."""
+        return float(self._raw["ev"]["sharp_max_staleness_minutes"])
+
+    @property
     def sports(self) -> list[dict[str, Any]]:
         return self._raw["sports"]
 
@@ -185,9 +193,14 @@ class Settings:
     @property
     def scan_bookmakers(self) -> str:
         """Comma-separated bookmaker keys for the `bookmakers=` param on real scans --
-        Pinnacle + our confirmed Ontario books. 7 keys total (<=10), confirmed by The Odds
-        API docs to price as 1 region-equivalent instead of 2 (eu + ca)."""
-        return ",".join(self.sharp_book_keys + self.ontario_known_keys)
+        Pinnacle + the 3 consensus books (fanduel/draftkings/betmgm -- fallback reference
+        when Pinnacle is absent or stale, see betbot.matching) + our confirmed Ontario
+        books. 10 keys total (<=10), confirmed by The Odds API docs to price as 1
+        region-equivalent instead of 2 (eu + ca). Deliberately NOT extended with a 4th
+        fallback book (e.g. Caesars) -- that would push this to 11 keys, tipping into 2
+        region-equivalents and doubling the cost of every single main-market scan
+        permanently, not just during a Pinnacle gap."""
+        return ",".join(self.sharp_book_keys + self.consensus_book_keys + self.ontario_known_keys)
 
     @property
     def props_bookmakers(self) -> str:
@@ -216,6 +229,16 @@ class Settings:
             if name:
                 return name
         return bookmaker_key
+
+    def method_display(self, sharp_book_key: str) -> str:
+        """Human-readable rendering of Alert.sharp_book_key: either the single sharp book
+        ("Pinnacle") or, for player props/game-alt markets devigged via consensus (see
+        main.py::_consensus_true_probs), the comma-joined contributing books it stores
+        there (e.g. "betmgm,draftkings,fanduel") rendered as "BetMGM + DraftKings +
+        FanDuel" -- lets a user see at a glance whether a line's "true" price came from
+        Pinnacle or an average of soft books, which matters since the latter is a noisier
+        reference (see props.min_ev_pct's higher floor in config/settings.yaml)."""
+        return " + ".join(self.display_name(key) for key in sharp_book_key.split(","))
 
     def homepage_url(self, bookmaker_key: str) -> str | None:
         """Last-resort deep-link fallback (per Odds API docs) when includeLinks didn't

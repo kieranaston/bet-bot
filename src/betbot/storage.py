@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import datetime as dt
 from contextlib import contextmanager
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
     Column,
@@ -24,6 +25,41 @@ Base = declarative_base()
 
 def utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
+
+
+# Human-readable league name per The Odds API sport_key, for Telegram alerts and /status --
+# makes it obvious at a glance which sportsbook tab to search without decoding the raw key.
+# Only needs entries for config/settings.yaml's `sports:` list; Alert.league_display() falls
+# back to the raw key for anything not listed here (e.g. a sport removed from config after
+# alerts on it were already stored).
+LEAGUE_LABELS = {
+    "americanfootball_nfl": "NFL",
+    "americanfootball_ncaaf": "NCAAF",
+    "americanfootball_cfl": "CFL",
+    "basketball_nba": "NBA",
+    "basketball_ncaab": "NCAAB",
+    "icehockey_nhl": "NHL",
+    "baseball_mlb": "MLB",
+    "mma_mixed_martial_arts": "MMA",
+    "soccer_epl": "EPL",
+    "soccer_spain_la_liga": "La Liga",
+    "soccer_germany_bundesliga": "Bundesliga",
+    "soccer_italy_serie_a": "Serie A",
+    "soccer_usa_mls": "MLS",
+    "soccer_uefa_champs_league": "Champions League",
+}
+
+
+def local_time_str(commence_time: dt.datetime, timezone: str) -> str:
+    """Formats a game's start time in the given local timezone, e.g. "Sun 1:00pm ET" --
+    shared by Telegram scan alerts and /status so both show the same at-a-glance sense of
+    when a bet will settle. `timezone` is an IANA zone name (config/settings.yaml
+    `scheduling.timezone`, "America/Toronto"); the "ET" suffix is hardcoded since that's the
+    only timezone this bot is configured for today."""
+    local = commence_time.astimezone(ZoneInfo(timezone))
+    hour12 = local.hour % 12 or 12
+    ampm = "am" if local.hour < 12 else "pm"
+    return f"{local.strftime('%a')} {hour12}:{local.minute:02d}{ampm} ET"
 
 
 class AwareDateTime(TypeDecorator):
@@ -133,6 +169,19 @@ class Alert(Base):
         stored value and all EV/Kelly math stay in decimal, since that's the format The
         Odds API returns and the formulas in devig.py/ev.py/kelly.py are written for."""
         return american_odds(self.book_odds)
+
+    def true_odds_display(self) -> str:
+        """The devigged "fair" probability (true_prob) converted to American odds for
+        display, e.g. true_prob=0.55 -> decimal 1.818 -> "-122". Lets a user compare the
+        line we're betting against what we think it's actually worth, same format as
+        book_odds_display -- never feed this back into EV/Kelly math, which uses true_prob
+        directly."""
+        return american_odds(1.0 / self.true_prob)
+
+    def league_display(self) -> str:
+        """Human-readable league name (e.g. "NFL") for sport_key, so alerts/`/status` are
+        quick to place without decoding the raw Odds API key."""
+        return LEAGUE_LABELS.get(self.sport_key, self.sport_key)
 
 
 def american_odds(decimal_odds: float) -> str:

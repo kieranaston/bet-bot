@@ -2,16 +2,20 @@ import datetime as dt
 from types import SimpleNamespace
 
 from betbot import commands
-from betbot.storage import Alert, Database
+from betbot.storage import Alert, Database, local_time_str
 
 
 def _fake_settings(starting_bankroll: float = 1000.0, sports: list | None = None) -> SimpleNamespace:
     return SimpleNamespace(
         starting_bankroll=starting_bankroll,
-        display_name=lambda key: {"bet99_ca_on": "Bet99"}.get(key, key),
+        display_name=lambda key: {"bet99_ca_on": "Bet99", "pinnacle": "Pinnacle"}.get(key, key),
+        method_display=lambda key: " + ".join(
+            {"bet99_ca_on": "Bet99", "pinnacle": "Pinnacle"}.get(k, k) for k in key.split(",")
+        ),
         sports=sports if sports is not None else [],
         max_hours_ahead=48,
         scan_bookmakers="bet99_ca_on,pinnacle",
+        timezone="America/Toronto",
     )
 
 
@@ -303,6 +307,7 @@ def test_status_lists_open_bets_with_point():
     settings = _fake_settings()
     telegram = _fake_telegram()
     odds_client = _fake_odds_client()
+    commence_time = dt.datetime(2026, 12, 1, 19, 0, tzinfo=dt.timezone.utc)
     alert_id = _insert_alert(
         db,
         status="placed",
@@ -310,14 +315,18 @@ def test_status_lists_open_bets_with_point():
         market="spreads",
         outcome_name="Toronto Maple Leafs",
         point=-1.5,
+        commence_time=commence_time,
+        true_prob=0.52,
     )
 
     reply = commands._dispatch(db, settings, telegram, odds_client, "/status")
 
+    when = local_time_str(commence_time, "America/Toronto")
     assert reply == (
         "*Open bets:*\n"
-        f"#{alert_id} Montreal Canadiens @ Toronto Maple Leafs — Toronto Maple Leafs -1.5 "
-        "@ +105 (Bet99) $40.00"
+        f"#{alert_id} NHL Montreal Canadiens @ Toronto Maple Leafs ({when}) — "
+        "Toronto Maple Leafs -1.5 @ +105 (Bet99) $40.00\n"
+        "    True odds: -108 (via Pinnacle)"
     )
 
 

@@ -11,17 +11,18 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
-from zoneinfo import ZoneInfo
+from typing import Callable
 
 from betbot import commands, settlement
 from betbot.config import Secrets, Settings, settings
 from betbot.devig import devig, devig_consensus
 from betbot.ev import ev_pct
 from betbot.kelly import stake_amount
+from betbot.matching import is_fresh, select_reference, true_prob_at
 from betbot.odds_client import OddsApiClient, OddsApiError
 from betbot.performance import build_report_lines
 from betbot.scheduler import current_scan_window_key, should_alert
-from betbot.storage import Alert, Database
+from betbot.storage import Alert, Database, local_time_str
 from betbot.telegram import TelegramClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -92,31 +93,39 @@ def process_event(
         return 0
 
     bookmakers = event.get("bookmakers", [])
-    sharp_bm = next((bm for bm in bookmakers if bm["key"] in settings.sharp_book_keys), None)
-    if sharp_bm is None:
-        return 0
-
     ontario_bms = [bm for bm in bookmakers if settings.is_ontario_book(bm["key"])]
     if not ontario_bms:
         return 0
 
     alerts_sent = 0
     for market_key in markets:
-        sharp_market = find_market(sharp_bm, market_key)
-        if not sharp_market:
-            continue
-        sharp_outcomes = extract_outcomes(sharp_market, sharp_bm)
-        if len(sharp_outcomes) < 2:
-            continue
-        try:
-            true_probs = devig(
-                [price for _, _, price, _, _ in sharp_outcomes], method=settings.devig_method
+        # Reference true-probability curve: Pinnacle if present/fresh/has this market,
+        # else a median basket of the consensus books (see betbot.matching.select_reference)
+        # -- added 2026-09-14 after live-verifying Pinnacle can go fully dark (scraped from
+        # Pinnacle's own public website per The Odds API's docs, so gaps are expected).
+        sharp_bm = next((bm for bm in bookmakers if bm["key"] in settings.sharp_book_keys), None)
+        sharp_market = find_market(sharp_bm, market_key) if sharp_bm else None
+        sharp_outcomes = (
+            [(name, point, price) for name, point, price, _, _ in extract_outcomes(sharp_market, sharp_bm)]
+            if sharp_market else None
+        )
+        basket_candidates = []
+        for bm in bookmakers:
+            if bm["key"] not in settings.consensus_book_keys:
+                continue
+            bm_market = find_market(bm, market_key)
+            if not bm_market:
+                continue
+            basket_candidates.append(
+                (bm["key"], [(name, point, price) for name, point, price, _, _ in extract_outcomes(bm_market, bm)])
             )
-        except ValueError:
+        selection = select_reference(
+            sharp_bm, sharp_outcomes, basket_candidates, settings.devig_method,
+            settings.min_consensus_books, now, settings.sharp_max_staleness_minutes,
+        )
+        if selection is None:
             continue
-        sharp_lookup = {
-            (name, point): p for (name, point, _, _, _), p in zip(sharp_outcomes, true_probs)
-        }
+        curve, sharp_book_key = selection
 
         # Pick only the single best-priced Ontario book per (outcome, point) instead of
         # alerting on every book that clears the EV threshold -- otherwise the same bet
@@ -136,9 +145,9 @@ def process_event(
                     best_by_outcome[key] = (book_bm["key"], price, link)
 
         for (name, point), (bookmaker_key, price, link) in best_by_outcome.items():
-            true_prob = sharp_lookup.get((name, point))
+            true_prob = true_prob_at(curve.get(name, []), point)
             if true_prob is None:
-                continue  # line doesn't match the sharp book's current line -- skip
+                continue  # not bracketed by any point the reference actually observed -- skip
             if true_prob < settings.min_true_prob:
                 continue  # too much of a longshot -- high variance, devig error grows at the tails
 
@@ -174,7 +183,7 @@ def process_event(
                 commence_time=commence_time,
                 hours_to_commence=hours_to_commence,
                 now=now,
-                sharp_book_key=sharp_bm["key"],
+                sharp_book_key=sharp_book_key,
             )
     return alerts_sent
 
@@ -264,24 +273,18 @@ def _upsert_and_maybe_notify(
         return 1
 
 
-def _local_time_str(commence_time: dt.datetime) -> str:
-    local = commence_time.astimezone(ZoneInfo(settings.timezone))
-    hour12 = local.hour % 12 or 12
-    ampm = "am" if local.hour < 12 else "pm"
-    return f"{local.strftime('%a')} {hour12}:{local.minute:02d}{ampm} ET"
-
-
 def _send_alert_message(telegram: TelegramClient, alert: Alert) -> None:
-    """Bare-minimum alert: what to bet, at what odds/book, for how much, and the two
-    commands to act on it -- true_prob is dropped since it's a diagnostic backing number,
-    not something needed to decide whether to place the bet."""
+    """What to bet, at what odds/book/league, for how much, what we think it's really
+    worth and how we priced that, and the two commands to act on it."""
     label = MARKET_LABELS.get(alert.market, alert.market)
     book = settings.display_name(alert.bookmaker_key)
 
     lines = [
-        f"*+{alert.ev_pct:.1f}% EV* · {label}: {alert.outcome_display()} @ {alert.book_odds_display()} ({book})",
-        f"{alert.away_team} @ {alert.home_team} · {_local_time_str(alert.commence_time)} · "
+        f"*+{alert.ev_pct:.1f}% EV* · {alert.league_display()} {label}: "
+        f"{alert.outcome_display()} @ {alert.book_odds_display()} ({book})",
+        f"{alert.away_team} @ {alert.home_team} · {local_time_str(alert.commence_time, settings.timezone)} · "
         f"${alert.recommended_stake:,.2f}",
+        f"True odds: {alert.true_odds_display()} (via {settings.method_display(alert.sharp_book_key)})",
     ]
     if alert.deep_link:
         lines.append(f"[Bet now]({alert.deep_link})")
@@ -335,13 +338,15 @@ def _consensus_true_probs(
 ) -> dict[tuple[str | None, str, float | None], tuple[float, str]]:
     """Groups a book's outcomes by (participant, point) -- the full set of outcomes for
     one line (Over/Under, or Yes/No) -- then devigs each contributing book's own price set
-    independently (a book's vig only reflects its own book) before averaging across books
-    via devig_consensus. Used two ways: player props (`consensus_bms` = several non-Ontario
-    US books, `min_books` = settings.min_consensus_books) and game-level alternate markets
-    that pair at identical points -- alternate_totals, team_totals, alternate_team_totals --
-    (`consensus_bms` = `[pinnacle_bm]`, `min_books=1`, which degenerates devig_consensus to
-    plain single-book devig). `alternate_spreads` does NOT fit this grouping (see
-    _devig_spread_alternates) since its two sides pair by point negation, not equality.
+    independently (a book's vig only reflects its own book) before averaging (mean) across
+    books via devig_consensus. Player-props-only as of 2026-09-14 (`consensus_bms` = several
+    non-Ontario US books, `min_books` = settings.min_consensus_books) -- game-level alternate
+    markets moved to betbot.matching.select_reference/true_prob_at (Pinnacle-or-median-basket
+    with point interpolation, not this function's exact-point, mean-averaged lookup). Kept
+    separate deliberately: Pinnacle never prices player props at all, so there's no
+    fresh-vs-stale distinction or fallback tier to apply here, and mean (not median) remains
+    the intended aggregate for this reference. `alternate_spreads` never fit this grouping
+    (see _devig_spread_alternates) since its two sides pair by point negation, not equality.
 
     Returns {(participant, outcome_name, point): (true_prob, "book1,book2")} -- keyed by
     outcome_name too so callers can look up whichever side an Ontario book is offering.
@@ -427,7 +432,7 @@ def _alert_on_matched_lines(
     sport_key: str,
     market_key: str,
     ontario_bms: list[dict],
-    sharp_lookup: dict[tuple[str | None, str, float | None], tuple[float, str]],
+    true_prob_lookup: Callable[[str | None, str, float | None], tuple[float, str] | None],
     min_ev_pct: float,
     bankroll: float,
     commence_time: dt.datetime,
@@ -435,12 +440,12 @@ def _alert_on_matched_lines(
     now: dt.datetime,
 ) -> int:
     """Shared best-price-selection + alerting for one already-devigged additional market --
-    used for both player props (consensus sharp_lookup, props.min_ev_pct floor) and
-    game-level alternates (Pinnacle sharp_lookup, ev.min_ev_pct floor). The only difference
-    between the two call sites is where sharp_lookup and min_ev_pct come from."""
-    if not sharp_lookup:
-        return 0
-
+    used for both player props (exact-match consensus lookup, props.min_ev_pct floor) and
+    game-level alternates (Pinnacle-or-basket curve lookup with interpolation, ev.min_ev_pct
+    floor). `true_prob_lookup(description, name, point) -> (true_prob, contributing_label) |
+    None` abstracts over that difference -- player props deliberately keep their existing
+    exact-(description,name,point) dict lookup (see process_prop_event), while game-level
+    alternates use a point-interpolating curve lookup (betbot.matching.true_prob_at)."""
     # Same "one alert per decision" best-price selection as process_event, keyed by
     # (participant, outcome, point) instead of just (outcome, point).
     best_by_outcome: dict[
@@ -459,9 +464,9 @@ def _alert_on_matched_lines(
 
     alerts_sent = 0
     for (description, name, point), (bookmaker_key, price, link) in best_by_outcome.items():
-        hit = sharp_lookup.get((description, name, point))
+        hit = true_prob_lookup(description, name, point)
         if hit is None:
-            continue  # line doesn't match the sharp reference's current line -- skip
+            continue  # not bracketed by any point the reference actually observed -- skip
         true_prob, contributing_books = hit
         if true_prob < settings.min_true_prob:
             continue  # too much of a longshot -- high variance, devig error grows at the tails
@@ -523,9 +528,11 @@ def process_prop_event(
       gated behind the higher `props.min_ev_pct` floor since that reference is noisier than
       a genuinely sharp book.
     - `game_alt_markets`: game-level alternate lines (alternate_spreads, alternate_totals,
-      team_totals, alternate_team_totals) that Pinnacle DOES price -- these devig against
-      Pinnacle alone, same as main markets, and use the main-markets `ev.min_ev_pct` floor,
-      not the props one.
+      team_totals, alternate_team_totals) that Pinnacle DOES price -- these use the same
+      Pinnacle-or-median-basket-fallback selection and point interpolation as main markets
+      (betbot.matching.select_reference/true_prob_at, except alternate_spreads, which stays
+      Pinnacle-only -- see below), and the main-markets `ev.min_ev_pct` floor, not the props
+      one.
 
     `event` is a single-event response from OddsApiClient.get_event_odds (already scoped to
     the combined market list), not the bulk /odds shape process_event consumes.
@@ -546,33 +553,85 @@ def process_prop_event(
     consensus_bms = [bm for bm in bookmakers if bm["key"] in settings.consensus_book_keys]
     if player_markets and len(consensus_bms) >= settings.min_consensus_books:
         for market_key in player_markets:
+            # Player props deliberately keep the original exact-match, mean-averaged
+            # consensus lookup -- Pinnacle never prices these at all, so there's no
+            # fresh-vs-stale distinction to make, and this wasn't part of the 2026-09-14
+            # fallback/interpolation change (see CLAUDE.md).
             sharp_lookup = _consensus_true_probs(
                 consensus_bms, market_key, settings.min_consensus_books, settings.devig_method
             )
             alerts_sent += _alert_on_matched_lines(
-                db, telegram, event, sport_key, market_key, ontario_bms, sharp_lookup,
+                db, telegram, event, sport_key, market_key, ontario_bms,
+                lambda d, n, p, _lookup=sharp_lookup: _lookup.get((d, n, p)),
                 settings.props_min_ev_pct, bankroll, commence_time, hours_to_commence, now,
             )
 
     pinnacle_bm = next((bm for bm in bookmakers if bm["key"] in settings.sharp_book_keys), None)
-    if game_alt_markets and pinnacle_bm:
+    if game_alt_markets:
         for market_key in game_alt_markets:
             if market_key == "alternate_spreads":
+                # Point-negation pairing (Cowboys -3.5 / Giants +3.5), not equal-point --
+                # doesn't fit select_reference's per-book-outcome shape. Pinnacle-only for
+                # now (unverified whether the consensus basket even carries this market in
+                # a compatible shape -- see CLAUDE.md), but DOES now interpolate across
+                # Pinnacle's own alternate-line ladder instead of requiring an exact point.
+                if not pinnacle_bm or not is_fresh(pinnacle_bm, now, settings.sharp_max_staleness_minutes):
+                    continue
                 raw_lookup = _devig_spread_alternates(pinnacle_bm, market_key, settings.devig_method)
-                sharp_lookup = {
-                    (None, name, point): (prob, "pinnacle")
-                    for (name, point), prob in raw_lookup.items()
-                }
+                curve: dict[tuple[str | None, str], list[tuple[float | None, float]]] = {}
+                for (name, point), prob in raw_lookup.items():
+                    curve.setdefault((None, name), []).append((point, prob))
+                for key in curve:
+                    curve[key].sort()
+                lookup = _curve_lookup(curve, "pinnacle")
             else:
-                sharp_lookup = _consensus_true_probs(
-                    [pinnacle_bm], market_key, min_books=1, devig_method=settings.devig_method
+                sharp_market = find_market(pinnacle_bm, market_key) if pinnacle_bm else None
+                sharp_outcomes = (
+                    [
+                        ((description, name), point, price)
+                        for name, point, price, description, _ in extract_outcomes(sharp_market, pinnacle_bm)
+                    ]
+                    if sharp_market else None
                 )
+                basket_candidates = []
+                for bm in consensus_bms:
+                    bm_market = find_market(bm, market_key)
+                    if not bm_market:
+                        continue
+                    basket_candidates.append((
+                        bm["key"],
+                        [
+                            ((description, name), point, price)
+                            for name, point, price, description, _ in extract_outcomes(bm_market, bm)
+                        ],
+                    ))
+                selection = select_reference(
+                    pinnacle_bm, sharp_outcomes, basket_candidates, settings.devig_method,
+                    settings.min_consensus_books, now, settings.sharp_max_staleness_minutes,
+                )
+                if selection is None:
+                    continue
+                curve, label = selection
+                lookup = _curve_lookup(curve, label)
+
             alerts_sent += _alert_on_matched_lines(
-                db, telegram, event, sport_key, market_key, ontario_bms, sharp_lookup,
+                db, telegram, event, sport_key, market_key, ontario_bms, lookup,
                 settings.min_ev_pct, bankroll, commence_time, hours_to_commence, now,
             )
 
     return alerts_sent
+
+
+def _curve_lookup(
+    curve: dict[tuple[str | None, str], list[tuple[float | None, float]]], label: str
+) -> Callable[[str | None, str, float | None], tuple[float, str] | None]:
+    """Adapts a (description, name)-keyed probability curve into the
+    `true_prob_lookup(description, name, point)` shape _alert_on_matched_lines expects,
+    interpolating via betbot.matching.true_prob_at instead of requiring an exact point."""
+    def lookup(description: str | None, name: str, point: float | None) -> tuple[float, str] | None:
+        prob = true_prob_at(curve.get((description, name), []), point)
+        return None if prob is None else (prob, label)
+    return lookup
 
 
 def _events_within_pregame_window(

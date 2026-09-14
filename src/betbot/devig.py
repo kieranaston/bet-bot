@@ -18,6 +18,8 @@ textbook baseline most public +EV tooling uses:
 """
 from __future__ import annotations
 
+import statistics
+
 
 def implied_prob(decimal_odds: float) -> float:
     if decimal_odds <= 1.0:
@@ -66,25 +68,27 @@ def devig_consensus(
     per_book_odds: dict[str, list[float]],
     min_books: int,
     method: str = "additive",
+    aggregate: str = "mean",
 ) -> list[float] | None:
     """For markets with no single sharp reference (player props -- Pinnacle doesn't
-    reliably price these), average no-vig true probabilities across several high-volume
+    reliably price these), combine no-vig true probabilities across several high-volume
     books instead of trusting any one of them. `per_book_odds` maps bookmaker key ->
     decimal odds for the same outcomes, in the same order, e.g.
     {"fanduel": [over_price, under_price], "draftkings": [over_price, under_price]}.
 
     Each book is devigged independently (its own vig only reflects its own book), then the
-    resulting true probabilities are averaged per-outcome across books. Returns None if
-    fewer than `min_books` books are present -- a single book's price is not a consensus,
-    and the caller should skip rather than alert on a one-book "average". Also degenerates
-    correctly to plain single-book devig when exactly one book is passed with
-    `min_books=1` -- used for game-level alternate markets devigged against Pinnacle alone.
+    resulting true probabilities are combined per-outcome across books via `aggregate`
+    ("mean", the default -- used unchanged for player-prop consensus, or "median" -- used by
+    the Pinnacle-fallback basket in betbot.matching, for robustness against one outlier
+    book). Returns None if fewer than `min_books` books are present -- a single book's price
+    is not a consensus, and the caller should skip rather than alert on a one-book "average".
+    Also degenerates correctly to plain single-book devig when exactly one book is passed
+    with `min_books=1` -- used for game-level alternate markets devigged against Pinnacle
+    alone.
     """
     if len(per_book_odds) < min_books:
         return None
     per_book_probs = [devig(odds, method=method) for odds in per_book_odds.values()]
     num_outcomes = len(per_book_probs[0])
-    return [
-        sum(probs[i] for probs in per_book_probs) / len(per_book_probs)
-        for i in range(num_outcomes)
-    ]
+    combine = statistics.median if aggregate == "median" else statistics.mean
+    return [combine(probs[i] for probs in per_book_probs) for i in range(num_outcomes)]

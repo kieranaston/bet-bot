@@ -62,8 +62,10 @@ then up to two things gated by independent scan windows:
  pregame_window_hours`.
 
 The main-market pipeline per sport, per event, per market (`main.py::process_event`):
-`odds_client.py` (fetch) → `devig.py::devig()` (Pinnacle price → true probability) →
-`ev.py` (true prob vs. Ontario book price → EV%) → `kelly.py` (quarter-Kelly stake sizing,
+`odds_client.py` (fetch) → `matching.py::select_reference()`/`true_prob_at()` (Pinnacle-or-
+median-consensus-basket price(s) → true probability, interpolated at the Ontario book's exact
+point — see the "Sharp reference selection" invariant below) → `ev.py` (true prob vs. Ontario
+book price → EV%) → `kelly.py` (quarter-Kelly stake sizing,
 capped by `bankroll.max_stake_pct_of_bankroll`) → `storage.py` (upsert `Alert`, keyed on
 event+market+outcome+point+bookmaker+participant) → `scheduler.should_alert()` (adaptive
 cooldown gate) → `telegram.py` (send).
@@ -81,9 +83,10 @@ share the same per-event fetch but devig differently:
   average is a noisier reference than a genuinely sharp book.
 - **`game_alt_markets`** (currently NFL, MLB — `alternate_spreads`, `alternate_totals`,
   `team_totals`, `alternate_team_totals`): game-level alternate lines that Pinnacle DOES
-  price, added 2026-09-13. These devig against Pinnacle alone (`main.py::_consensus_true_probs`
-  called with a single-book list and `min_books=1`) and use the main-markets `ev.min_ev_pct`
-  floor (2%), not the props one — Pinnacle is just as sharp here as for h2h/spreads/totals.
+  price, added 2026-09-13. These use the same Pinnacle-or-median-basket selection as main
+  markets (`matching.py::select_reference`, see below) — except `alternate_spreads`, which
+  stays Pinnacle-only — and the main-markets `ev.min_ev_pct` floor (2%), not the props one —
+  Pinnacle is just as sharp here as for h2h/spreads/totals.
   `alternate_spreads` needs its own grouping function, `_devig_spread_alternates`: unlike
   every other market in this bot, its two sides pair by **point negation** (Cowboys -3.5
   pairs with Giants +3.5), not matching point — verified live, not assumed. Don't try to
@@ -98,11 +101,14 @@ Key invariants to preserve when touching this path:
   for 3+ outcomes (soccer's 3-way h2h) since that safety/equivalence proof doesn't extend
   there. Don't call `devig_additive()` directly for a 3-outcome market — it raises.
 - **Cost model (main markets)**: real scans fetch odds with `bookmakers=` (built from
-  `config/bookmakers.yaml` sharp + Ontario keys, ≤10 keys total) rather than `regions=`, because
-  The Odds API prices every group of 10 bookmakers as 1 region-equivalent — half the cost of
-  `regions=eu,ca` for the same data. `config/settings.yaml`'s `odds_api.regions` is kept only for
-  `scripts/list_bookmakers.py`'s discovery use, not real scans. Don't reintroduce `regions=` on
-  the real scan path without redoing this cost math.
+  `config/bookmakers.yaml` sharp + consensus + Ontario keys, 10 keys total, exactly at the
+  ceiling — see below) rather than `regions=`, because The Odds API prices every group of 10
+  bookmakers as 1 region-equivalent — half the cost of `regions=eu,ca` for the same data.
+  `config/settings.yaml`'s `odds_api.regions` is kept only for `scripts/list_bookmakers.py`'s
+  discovery use, not real scans. Don't reintroduce `regions=` on the real scan path without
+  redoing this cost math, and don't add a 4th fallback book to `consensus:` (e.g. Caesars) —
+  that tips `scan_bookmakers` to 11 keys, which prices as *2* region-equivalents, doubling
+  the cost of every single main-market scan permanently, not just during a Pinnacle gap.
 - **Cost model (props/game-alt)**: these ("additional markets" per the docs) are rejected
   outright by the bulk `/odds` endpoint — they require `odds_client.py::get_event_odds()`,
   charged **per event**, not once per sport, and an empty response (no book has data at
@@ -130,9 +136,30 @@ Key invariants to preserve when touching this path:
   `soccer_` — the Draw outcome won, so the push branch is reserved for genuine 2-way ties
   (e.g. an NFL regular-season tie). Don't add a new 3-way sport without checking this branch
   still classifies its draw/tie outcome correctly.
-- **Line matching is exact**: a book's outcome only compares against Pinnacle if `(name, point)`
-  matches exactly (`main.py::process_event`, `sharp_lookup`); no point-approximation for
-  spreads/totals.
+- **Sharp reference selection + interpolated matching** (replaced the old
+  "Pinnacle-only, exact-point-match" design 2026-09-14, after live-verifying Pinnacle
+  returned **zero** data for every configured sport that day — The Odds API's docs note
+  Pinnacle odds are scraped from Pinnacle's own public website, so gaps are an expected
+  characteristic of the feed, not a rare fluke): for h2h/spreads/totals and `game_alt_markets`
+  (except `alternate_spreads`, see below), `betbot.matching.select_reference` picks Pinnacle
+  if its bookmaker entry is present, fresh (`is_fresh`, gated by
+  `ev.sharp_max_staleness_minutes`), and actually has the market; otherwise it falls back to
+  a **median** (not mean — robustness against one outlier book) of whichever `consensus:`
+  books (fanduel/draftkings/betmgm) also have it, requiring `>= settings.min_consensus_books`
+  distinct contributing books. Either way, matching no longer requires the Ontario book's
+  point to equal the reference's exactly: `true_prob_at` linearly **interpolates** between
+  the two nearest points the reference actually observed (this is often "free" even for
+  Pinnacle-fresh main markets, since different consensus books' current lines frequently
+  bracket the Ontario point without any extra fetch) and **never extrapolates** — a point
+  outside the observed range is still skipped, the same conservative behavior as before this
+  existed. `alternate_spreads` is the one exception: it stays Pinnacle-only (unverified
+  whether `consensus:` books carry it in a compatible point-negation shape — check via
+  `scripts/list_event_markets.py` before changing this), but does now interpolate across
+  Pinnacle's own alternate-line ladder instead of requiring an exact point. Player props
+  (`player_markets`, via `_consensus_true_probs`) are **unchanged** — still exact-point,
+  mean-averaged consensus, no Pinnacle involvement, no fallback tier (there's nothing to
+  fall back *from*). Don't reuse `_consensus_true_probs` for new game-alt-style markets;
+  route those through `select_reference`/`true_prob_at` instead.
 - **Re-alert suppression**: `Alert` rows are deduplicated on
   `(event_id, market, outcome_name, point, bookmaker_key, participant)` — `participant` (the
   player name; `""` for team markets, never `NULL` — see the comment on the column, Postgres

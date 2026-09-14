@@ -22,7 +22,7 @@ from betbot import settlement
 from betbot.config import Settings
 from betbot.odds_client import OddsApiClient
 from betbot.performance import build_report_lines
-from betbot.storage import Alert, Database
+from betbot.storage import Alert, Database, local_time_str
 from betbot.telegram import TelegramClient
 
 logger = logging.getLogger(__name__)
@@ -196,9 +196,11 @@ def _cmd_status(db: Database, settings: Settings) -> str:
         lines = ["*Open bets:*"]
         for a in open_bets:
             lines.append(
-                f"#{a.id} {a.away_team} @ {a.home_team} — {a.outcome_display()} "
+                f"#{a.id} {a.league_display()} {a.away_team} @ {a.home_team} "
+                f"({local_time_str(a.commence_time, settings.timezone)}) — {a.outcome_display()} "
                 f"@ {a.book_odds_display()} ({settings.display_name(a.bookmaker_key)}) "
-                f"${a.placed_stake:,.2f}"
+                f"${a.placed_stake:,.2f}\n"
+                f"    True odds: {a.true_odds_display()} (via {settings.method_display(a.sharp_book_key)})"
             )
         return "\n".join(lines)
 
