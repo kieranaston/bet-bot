@@ -323,10 +323,10 @@ def test_status_lists_open_bets_with_point():
 
     when = local_time_str(commence_time, "America/Toronto")
     assert reply == (
-        "*Open bets:*\n"
+        "*Open bets:*\n\n"
         f"#{alert_id} NHL Montreal Canadiens @ Toronto Maple Leafs ({when}) — "
         "Toronto Maple Leafs -1.5 @ +105 (Bet99) $40.00\n"
-        "    True odds: -108 (via Pinnacle)"
+        "True odds: -108 (via Pinnacle)"
     )
 
 

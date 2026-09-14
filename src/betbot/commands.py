@@ -193,16 +193,16 @@ def _cmd_status(db: Database, settings: Settings) -> str:
         ).all()
         if not open_bets:
             return "No open bets."
-        lines = ["*Open bets:*"]
+        entries = []
         for a in open_bets:
-            lines.append(
+            entries.append(
                 f"#{a.id} {a.league_display()} {a.away_team} @ {a.home_team} "
                 f"({local_time_str(a.commence_time, settings.timezone)}) — {a.outcome_display()} "
                 f"@ {a.book_odds_display()} ({settings.display_name(a.bookmaker_key)}) "
                 f"${a.placed_stake:,.2f}\n"
-                f"    True odds: {a.true_odds_display()} (via {settings.method_display(a.sharp_book_key)})"
+                f"True odds: {a.true_odds_display()} (via {settings.method_display(a.sharp_book_key)})"
             )
-        return "\n".join(lines)
+        return "*Open bets:*\n\n" + "\n\n".join(entries)
 
 
 def _cmd_stats(db: Database, settings: Settings) -> str:
