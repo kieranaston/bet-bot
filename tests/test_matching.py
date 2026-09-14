@@ -156,3 +156,50 @@ def test_select_reference_none_when_pinnacle_missing_and_no_basket():
         min_consensus_books=2, now=now, max_staleness_minutes=20,
     )
     assert selection is None
+
+
+def test_book_points_by_line_devigs_each_total_line_independently():
+    from betbot.matching import book_points, book_points_by_line
+
+    ladder = []
+    for pt in (41.5, 42.5, 43.5):
+        ladder.append((("game", "Over"), pt, 1.91))
+        ladder.append((("game", "Under"), pt, 1.91))
+
+    # Joint (wrong for ladders): collapses toward 1/N
+    joint = book_points(ladder, "additive")
+    assert joint[("game", "Over")][0][1] == pytest.approx(1 / 6)
+
+    # Per-line: each Over ≈ 0.5
+    by_line = book_points_by_line(ladder, "additive")
+    for pt, prob in by_line[("game", "Over")]:
+        assert prob == pytest.approx(0.5)
+
+
+def test_merge_curve_anchors_keeps_primary_and_adds_missing_points():
+    from betbot.matching import merge_curve_anchors, true_prob_at
+
+    primary = {"Home": [(-3.0, 0.55)]}
+    secondary = {"Home": [(-4.0, 0.60), (-3.0, 0.50)]}  # -3.0 must not overwrite primary
+    merged = merge_curve_anchors(primary, secondary)
+    assert merged["Home"] == [(-4.0, 0.60), (-3.0, 0.55)]
+    assert true_prob_at(merged["Home"], -3.5) == pytest.approx(0.575)
+
+
+def test_select_reference_merges_basket_anchors_when_pinnacle_fresh():
+    now = dt.datetime.now(dt.timezone.utc)
+    sharp_bm = _bm("pinnacle")
+    sharp_outcomes = [("Home", -3.0, 1.91), ("Away", 3.0, 1.91)]
+    basket = [
+        ("fanduel", [("Home", -4.0, 1.91), ("Away", 4.0, 1.91)]),
+        ("draftkings", [("Home", -4.0, 1.91), ("Away", 4.0, 1.91)]),
+    ]
+    selection = select_reference(
+        sharp_bm, sharp_outcomes, basket, devig_method="additive",
+        min_consensus_books=2, now=now, max_staleness_minutes=20,
+    )
+    assert selection is not None
+    curve, label = selection
+    assert label == "pinnacle"
+    # Ontario -3.5 is bracketed by Pinnacle -3.0 and basket -4.0
+    assert true_prob_at(curve["Home"], -3.5) == pytest.approx(0.5)

@@ -112,7 +112,7 @@ def test_process_event_filters_out_extreme_longshots():
     telegram = MagicMock()
 
     # Sharp implied probs already sum to 1.0: Home 0.8333 (favorite), Away 0.1667 (longshot,
-    # below the 0.25 min_true_prob floor).
+    # below the 0.20 min_true_prob floor).
     sharp = _bookmaker(
         "pinnacle", [{"name": "Home Team", "price": 1.20}, {"name": "Away Team", "price": 6.00}]
     )
@@ -444,7 +444,7 @@ def test_process_event_skips_point_outside_basket_range():
 
 
 def test_process_prop_event_alternate_spreads_interpolates_across_pinnacle_ladder():
-    """alternate_spreads stays Pinnacle-only, but should now interpolate across Pinnacle's
+    """alternate_spreads prefers Pinnacle, but should interpolate across Pinnacle's
     own point-negated ladder instead of requiring an exact point match."""
     db = Database("sqlite:///:memory:")
     telegram = MagicMock()
@@ -547,7 +547,7 @@ def test_process_prop_event_game_alt_falls_back_to_basket_when_pinnacle_missing(
 
 def test_process_prop_event_game_alt_market_uses_main_ev_floor_not_props_floor():
     """game_alt_markets devig against Pinnacle (a genuinely sharp book), so they should
-    clear at ev.min_ev_pct (2%), NOT the stricter props.min_ev_pct (5%) used for the
+    clear at ev.min_ev_pct (2%), NOT the stricter props.min_ev_pct (3%) used for the
     noisier multi-book player-prop consensus."""
     db = Database("sqlite:///:memory:")
     telegram = MagicMock()
@@ -562,7 +562,7 @@ def test_process_prop_event_game_alt_market_uses_main_ev_floor_not_props_floor()
     )
     ontario = _prop_bookmaker(
         "bet99_ca_on", "team_totals",
-        [{"name": "Over", "point": 24.5, "price": 1.98, "description": "Home Team"}],
+        [{"name": "Over", "point": 24.5, "price": 1.96, "description": "Home Team"}],
     )
     event = _event([pinnacle, ontario])
 
@@ -577,6 +577,239 @@ def test_process_prop_event_game_alt_market_uses_main_ev_floor_not_props_floor()
         alert = s.query(Alert).one()
         assert alert.participant == "Home Team"
         assert alert.sharp_book_key == "pinnacle"
-        # EV here sits between the two floors (~3.6%) -- this only alerts if the game-alt
-        # path used ev.min_ev_pct (2.0), not props.min_ev_pct (5.0).
-        assert 2.0 <= alert.ev_pct < 5.0
+        # EV here sits between the two floors (~2.5%) -- this only alerts if the game-alt
+        # path used ev.min_ev_pct (2.0), not props.min_ev_pct (3.0).
+        assert 2.0 <= alert.ev_pct < 3.0
+
+
+def test_process_prop_event_alternate_totals_multi_line_ladder_does_not_collapse_probs():
+    """Live alternate_totals returns many Over/Under lines in one market. Joint N-way
+    devig would push each side to ~0.1 (below min_true_prob); per-line devig must keep
+    ~0.5 so a fair-priced +EV Ontario line can still alert."""
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    market_key = "alternate_totals"
+
+    def ladder(prices_over_under):
+        outs = []
+        for point, over_p, under_p in prices_over_under:
+            outs.append({"name": "Over", "point": point, "price": over_p})
+            outs.append({"name": "Under", "point": point, "price": under_p})
+        return outs
+
+    pinnacle = _prop_bookmaker(
+        "pinnacle", market_key,
+        ladder([(41.5, 1.91, 1.91), (42.5, 1.91, 1.91), (43.5, 1.91, 1.91),
+                (44.5, 1.91, 1.91), (45.5, 1.91, 1.91)]),
+    )
+    ontario = _prop_bookmaker(
+        "bet99_ca_on", market_key,
+        [{"name": "Over", "point": 43.5, "price": 2.20}],
+    )
+    event = _event([pinnacle, ontario])
+
+    sent = process_prop_event(
+        db, telegram, event, "americanfootball_nfl", [],
+        bankroll=1000.0, now=dt.datetime.now(dt.timezone.utc),
+        game_alt_markets=[market_key],
+    )
+
+    assert sent == 1
+    with db.session() as s:
+        alert = s.query(Alert).one()
+        assert alert.true_prob == pytest.approx(0.5)
+        assert alert.point == 43.5
+
+
+def test_process_prop_event_team_totals_two_teams_devig_independently():
+    """team_totals packs both teams into one market -- each team's Over/Under must be
+    devigged as its own 2-way, not as a joint 4-way (~0.25 true probs)."""
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    market_key = "team_totals"
+
+    pinnacle = _prop_bookmaker(
+        "pinnacle", market_key,
+        [
+            {"name": "Over", "point": 22.5, "price": 1.91, "description": "Home Team"},
+            {"name": "Under", "point": 22.5, "price": 1.91, "description": "Home Team"},
+            {"name": "Over", "point": 24.5, "price": 1.91, "description": "Away Team"},
+            {"name": "Under", "point": 24.5, "price": 1.91, "description": "Away Team"},
+        ],
+    )
+    ontario = _prop_bookmaker(
+        "bet99_ca_on", market_key,
+        [
+            {"name": "Over", "point": 22.5, "price": 2.20, "description": "Home Team"},
+            {"name": "Over", "point": 24.5, "price": 2.20, "description": "Away Team"},
+        ],
+    )
+    event = _event([pinnacle, ontario])
+
+    sent = process_prop_event(
+        db, telegram, event, "americanfootball_nfl", [],
+        bankroll=1000.0, now=dt.datetime.now(dt.timezone.utc),
+        game_alt_markets=[market_key],
+    )
+
+    assert sent == 2
+    with db.session() as s:
+        alerts = s.query(Alert).all()
+        assert all(a.true_prob == pytest.approx(0.5) for a in alerts)
+
+
+def test_process_event_fresh_pinnacle_uses_basket_anchors_to_interpolate():
+    """Fresh Pinnacle at -3.0 alone cannot bracket Ontario -3.5; a consensus book at -4.0
+    should be merged as an interpolation anchor so the line still resolves."""
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    now = dt.datetime.now(dt.timezone.utc)
+
+    pinnacle = _bookmaker(
+        "pinnacle",
+        [
+            {"name": "Home Team", "point": -3.0, "price": 1.91},
+            {"name": "Away Team", "point": 3.0, "price": 1.91},
+        ],
+    )
+    pinnacle["markets"][0]["key"] = "spreads"
+    fanduel = _bookmaker(
+        "fanduel",
+        [
+            {"name": "Home Team", "point": -4.0, "price": 1.91},
+            {"name": "Away Team", "point": 4.0, "price": 1.91},
+        ],
+    )
+    fanduel["markets"][0]["key"] = "spreads"
+    draftkings = _bookmaker(
+        "draftkings",
+        [
+            {"name": "Home Team", "point": -4.0, "price": 1.91},
+            {"name": "Away Team", "point": 4.0, "price": 1.91},
+        ],
+    )
+    draftkings["markets"][0]["key"] = "spreads"
+    book = _bookmaker(
+        "bet99_ca_on",
+        [
+            {"name": "Home Team", "point": -3.5, "price": 2.20},
+            {"name": "Away Team", "point": 3.5, "price": 1.70},
+        ],
+    )
+    book["markets"][0]["key"] = "spreads"
+    event = _event([pinnacle, fanduel, draftkings, book])
+
+    sent = process_event(
+        db, telegram, event, "americanfootball_nfl", ["spreads"],
+        bankroll=1000.0, now=now,
+    )
+
+    assert sent == 1
+    with db.session() as s:
+        alert = s.query(Alert).one()
+        assert alert.point == -3.5
+        assert alert.true_prob == pytest.approx(0.5)
+        assert alert.sharp_book_key == "pinnacle"
+
+
+def test_process_prop_event_interpolates_player_prop_across_consensus_points():
+    """Ontario posts 24.5 while consensus books only quote 24.0 and 25.0 -- should
+    interpolate rather than skip."""
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    market_key = "player_points"
+
+    fanduel = _prop_bookmaker(
+        "fanduel", market_key,
+        [
+            {"name": "Over", "point": 24.0, "price": 1.91, "description": "Player A"},
+            {"name": "Under", "point": 24.0, "price": 1.91, "description": "Player A"},
+        ],
+    )
+    draftkings = _prop_bookmaker(
+        "draftkings", market_key,
+        [
+            {"name": "Over", "point": 25.0, "price": 1.91, "description": "Player A"},
+            {"name": "Under", "point": 25.0, "price": 1.91, "description": "Player A"},
+        ],
+    )
+    # Need both books at BOTH points for each line to contribute to that line's consensus.
+    # Rebuild: each book quotes both 24 and 25.
+    fanduel = _prop_bookmaker(
+        "fanduel", market_key,
+        [
+            {"name": "Over", "point": 24.0, "price": 1.91, "description": "Player A"},
+            {"name": "Under", "point": 24.0, "price": 1.91, "description": "Player A"},
+            {"name": "Over", "point": 25.0, "price": 1.91, "description": "Player A"},
+            {"name": "Under", "point": 25.0, "price": 1.91, "description": "Player A"},
+        ],
+    )
+    draftkings = _prop_bookmaker(
+        "draftkings", market_key,
+        [
+            {"name": "Over", "point": 24.0, "price": 1.91, "description": "Player A"},
+            {"name": "Under", "point": 24.0, "price": 1.91, "description": "Player A"},
+            {"name": "Over", "point": 25.0, "price": 1.91, "description": "Player A"},
+            {"name": "Under", "point": 25.0, "price": 1.91, "description": "Player A"},
+        ],
+    )
+    ontario = _prop_bookmaker(
+        "bet99_ca_on", market_key,
+        [{"name": "Over", "point": 24.5, "price": 2.20, "description": "Player A"}],
+    )
+    event = _event([fanduel, draftkings, ontario])
+
+    sent = process_prop_event(
+        db, telegram, event, "basketball_nba", [market_key],
+        bankroll=1000.0, now=dt.datetime.now(dt.timezone.utc),
+    )
+
+    assert sent == 1
+    with db.session() as s:
+        alert = s.query(Alert).one()
+        assert alert.point == 24.5
+        assert alert.true_prob == pytest.approx(0.5)
+
+
+def test_process_prop_event_alternate_spreads_falls_back_to_basket_when_pinnacle_stale():
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    now = dt.datetime.now(dt.timezone.utc)
+
+    pinnacle = _prop_bookmaker(
+        "pinnacle", "alternate_spreads",
+        [
+            {"name": "Cowboys", "point": -3.5, "price": 1.91},
+            {"name": "Giants", "point": 3.5, "price": 1.91},
+        ],
+    )
+    pinnacle["last_update"] = _stale_iso(now, 3)
+    fanduel = _prop_bookmaker(
+        "fanduel", "alternate_spreads",
+        [
+            {"name": "Cowboys", "point": -3.5, "price": 1.91},
+            {"name": "Giants", "point": 3.5, "price": 1.91},
+        ],
+    )
+    draftkings = _prop_bookmaker(
+        "draftkings", "alternate_spreads",
+        [
+            {"name": "Cowboys", "point": -3.5, "price": 1.91},
+            {"name": "Giants", "point": 3.5, "price": 1.91},
+        ],
+    )
+    ontario = _prop_bookmaker(
+        "bet99_ca_on", "alternate_spreads",
+        [{"name": "Cowboys", "point": -3.5, "price": 2.60}],
+    )
+    event = _event([pinnacle, fanduel, draftkings, ontario])
+
+    sent = process_prop_event(
+        db, telegram, event, "americanfootball_nfl", [],
+        bankroll=1000.0, now=now, game_alt_markets=["alternate_spreads"],
+    )
+
+    assert sent == 1
+    with db.session() as s:
+        alert = s.query(Alert).one()
+        assert alert.sharp_book_key == "draftkings,fanduel"

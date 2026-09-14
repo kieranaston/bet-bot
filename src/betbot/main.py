@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
+from collections import defaultdict
 from typing import Callable
 
 from betbot import commands, settlement
@@ -18,7 +19,13 @@ from betbot.config import Secrets, Settings, settings
 from betbot.devig import devig, devig_consensus
 from betbot.ev import ev_pct
 from betbot.kelly import stake_amount
-from betbot.matching import is_fresh, select_reference, true_prob_at
+from betbot.matching import (
+    build_curve,
+    is_fresh,
+    merge_curve_anchors,
+    select_reference,
+    true_prob_at,
+)
 from betbot.odds_client import OddsApiClient, OddsApiError
 from betbot.performance import build_report_lines
 from betbot.scheduler import current_scan_window_key, should_alert
@@ -339,11 +346,9 @@ def _consensus_true_probs(
     """Groups a book's outcomes by (participant, point) -- the full set of outcomes for
     one line (Over/Under, or Yes/No) -- then devigs each contributing book's own price set
     independently (a book's vig only reflects its own book) before averaging (mean) across
-    books via devig_consensus. Player-props-only as of 2026-09-14 (`consensus_bms` = several
-    non-Ontario US books, `min_books` = settings.min_consensus_books) -- game-level alternate
-    markets moved to betbot.matching.select_reference/true_prob_at (Pinnacle-or-median-basket
-    with point interpolation, not this function's exact-point, mean-averaged lookup). Kept
-    separate deliberately: Pinnacle never prices player props at all, so there's no
+    books via devig_consensus. Player-props-only (`consensus_bms` = several non-Ontario US
+    books) -- game-level alternate markets use betbot.matching.select_reference/true_prob_at.
+    Kept separate deliberately: Pinnacle never prices player props at all, so there's no
     fresh-vs-stale distinction or fallback tier to apply here, and mean (not median) remains
     the intended aggregate for this reference. `alternate_spreads` never fit this grouping
     (see _devig_spread_alternates) since its two sides pair by point negation, not equality.
@@ -380,6 +385,37 @@ def _consensus_true_probs(
         contributing = ",".join(sorted(per_book_odds))
         for name, prob in zip(names_order, true_probs):
             lookup[(description, name, point)] = (prob, contributing)
+    return lookup
+
+
+def _consensus_prop_lookup(
+    consensus_bms: list[dict], market_key: str, min_books: int, devig_method: str
+) -> Callable[[str | None, str, float | None], tuple[float, str] | None]:
+    """Player-prop true-prob lookup with point interpolation. Builds a per-(player, side)
+    curve from the exact-point consensus probs, then true_prob_at -- so Ontario 24.5 can
+    still resolve when consensus books only quote 24.0 and 25.0. Never extrapolates."""
+    exact = _consensus_true_probs(consensus_bms, market_key, min_books, devig_method)
+    curves: dict[tuple[str | None, str], list[tuple[float | None, float]]] = {}
+    labels: dict[tuple[str | None, str], set[str]] = defaultdict(set)
+    for (description, name, point), (prob, contributing) in exact.items():
+        key = (description, name)
+        curves.setdefault(key, []).append((point, prob))
+        labels[key].update(contributing.split(","))
+    for key in curves:
+        curves[key].sort(key=lambda x: (x[0] is not None, x[0] if x[0] is not None else 0.0))
+
+    def lookup(
+        description: str | None, name: str, point: float | None
+    ) -> tuple[float, str] | None:
+        key = (description, name)
+        curve = curves.get(key)
+        if not curve:
+            return None
+        true_prob = true_prob_at(curve, point)
+        if true_prob is None:
+            return None
+        return true_prob, ",".join(sorted(labels[key]))
+
     return lookup
 
 
@@ -425,6 +461,20 @@ def _devig_spread_alternates(
     return lookup
 
 
+def _spread_alt_points_from_bm(
+    bm: dict, market_key: str, devig_method: str
+) -> dict[tuple[str | None, str], list[tuple[float | None, float]]]:
+    """Convert _devig_spread_alternates flat lookup into a (None, team)-keyed curve dict
+    suitable for build_curve / merge_curve_anchors / _curve_lookup."""
+    raw = _devig_spread_alternates(bm, market_key, devig_method)
+    curve: dict[tuple[str | None, str], list[tuple[float | None, float]]] = defaultdict(list)
+    for (name, point), prob in raw.items():
+        curve[(None, name)].append((point, prob))
+    for key in curve:
+        curve[key].sort(key=lambda x: (x[0] is not None, x[0] if x[0] is not None else 0.0))
+    return dict(curve)
+
+
 def _alert_on_matched_lines(
     db: Database,
     telegram: TelegramClient,
@@ -440,12 +490,10 @@ def _alert_on_matched_lines(
     now: dt.datetime,
 ) -> int:
     """Shared best-price-selection + alerting for one already-devigged additional market --
-    used for both player props (exact-match consensus lookup, props.min_ev_pct floor) and
+    used for both player props (interpolating consensus lookup, props.min_ev_pct floor) and
     game-level alternates (Pinnacle-or-basket curve lookup with interpolation, ev.min_ev_pct
     floor). `true_prob_lookup(description, name, point) -> (true_prob, contributing_label) |
-    None` abstracts over that difference -- player props deliberately keep their existing
-    exact-(description,name,point) dict lookup (see process_prop_event), while game-level
-    alternates use a point-interpolating curve lookup (betbot.matching.true_prob_at)."""
+    None` abstracts over that difference."""
     # Same "one alert per decision" best-price selection as process_event, keyed by
     # (participant, outcome, point) instead of just (outcome, point).
     best_by_outcome: dict[
@@ -524,15 +572,16 @@ def process_prop_event(
 
     - `player_markets`: Pinnacle doesn't reliably price player props, so there's no single
       sharp book -- the "true" line is a multi-book average of non-Ontario US books'
-      no-vig probabilities (config/bookmakers.yaml `consensus:`, via _consensus_true_probs),
-      gated behind the higher `props.min_ev_pct` floor since that reference is noisier than
-      a genuinely sharp book.
+      no-vig probabilities (config/bookmakers.yaml `consensus:`, via _consensus_prop_lookup),
+      with point interpolation across consensus lines, gated behind the higher
+      `props.min_ev_pct` floor since that reference is noisier than a genuinely sharp book.
     - `game_alt_markets`: game-level alternate lines (alternate_spreads, alternate_totals,
       team_totals, alternate_team_totals) that Pinnacle DOES price -- these use the same
       Pinnacle-or-median-basket-fallback selection and point interpolation as main markets
-      (betbot.matching.select_reference/true_prob_at, except alternate_spreads, which stays
-      Pinnacle-only -- see below), and the main-markets `ev.min_ev_pct` floor, not the props
-      one.
+      (betbot.matching.select_reference/true_prob_at, with per-line devig for totals-style
+      ladders; alternate_spreads uses point-negation pairing and now also accepts a
+      consensus basket when Pinnacle is missing/stale), and the main-markets `ev.min_ev_pct`
+      floor, not the props one.
 
     `event` is a single-event response from OddsApiClient.get_event_odds (already scoped to
     the combined market list), not the bulk /odds shape process_event consumes.
@@ -553,16 +602,11 @@ def process_prop_event(
     consensus_bms = [bm for bm in bookmakers if bm["key"] in settings.consensus_book_keys]
     if player_markets and len(consensus_bms) >= settings.min_consensus_books:
         for market_key in player_markets:
-            # Player props deliberately keep the original exact-match, mean-averaged
-            # consensus lookup -- Pinnacle never prices these at all, so there's no
-            # fresh-vs-stale distinction to make, and this wasn't part of the 2026-09-14
-            # fallback/interpolation change (see CLAUDE.md).
-            sharp_lookup = _consensus_true_probs(
+            sharp_lookup = _consensus_prop_lookup(
                 consensus_bms, market_key, settings.min_consensus_books, settings.devig_method
             )
             alerts_sent += _alert_on_matched_lines(
-                db, telegram, event, sport_key, market_key, ontario_bms,
-                lambda d, n, p, _lookup=sharp_lookup: _lookup.get((d, n, p)),
+                db, telegram, event, sport_key, market_key, ontario_bms, sharp_lookup,
                 settings.props_min_ev_pct, bankroll, commence_time, hours_to_commence, now,
             )
 
@@ -571,19 +615,15 @@ def process_prop_event(
         for market_key in game_alt_markets:
             if market_key == "alternate_spreads":
                 # Point-negation pairing (Cowboys -3.5 / Giants +3.5), not equal-point --
-                # doesn't fit select_reference's per-book-outcome shape. Pinnacle-only for
-                # now (unverified whether the consensus basket even carries this market in
-                # a compatible shape -- see CLAUDE.md), but DOES now interpolate across
-                # Pinnacle's own alternate-line ladder instead of requiring an exact point.
-                if not pinnacle_bm or not is_fresh(pinnacle_bm, now, settings.sharp_max_staleness_minutes):
+                # doesn't fit select_reference's per-book-outcome shape. Prefer fresh
+                # Pinnacle; fall back to a median basket of consensus books that carry a
+                # compatible 2-team-per-magnitude ladder; merge basket anchors onto Pinnacle
+                # for half-point interpolation.
+                lookup = _select_spread_alt_lookup(
+                    pinnacle_bm, consensus_bms, market_key, now,
+                )
+                if lookup is None:
                     continue
-                raw_lookup = _devig_spread_alternates(pinnacle_bm, market_key, settings.devig_method)
-                curve: dict[tuple[str | None, str], list[tuple[float | None, float]]] = {}
-                for (name, point), prob in raw_lookup.items():
-                    curve.setdefault((None, name), []).append((point, prob))
-                for key in curve:
-                    curve[key].sort()
-                lookup = _curve_lookup(curve, "pinnacle")
             else:
                 sharp_market = find_market(pinnacle_bm, market_key) if pinnacle_bm else None
                 sharp_outcomes = (
@@ -608,6 +648,7 @@ def process_prop_event(
                 selection = select_reference(
                     pinnacle_bm, sharp_outcomes, basket_candidates, settings.devig_method,
                     settings.min_consensus_books, now, settings.sharp_max_staleness_minutes,
+                    pair_by_line=True,
                 )
                 if selection is None:
                     continue
@@ -620,6 +661,42 @@ def process_prop_event(
             )
 
     return alerts_sent
+
+
+def _select_spread_alt_lookup(
+    pinnacle_bm: dict | None,
+    consensus_bms: list[dict],
+    market_key: str,
+    now: dt.datetime,
+) -> Callable[[str | None, str, float | None], tuple[float, str] | None] | None:
+    """Build an interpolating lookup for alternate_spreads from Pinnacle and/or consensus."""
+    basket_keys: list[str] = []
+    basket_points: list[dict] = []
+    for bm in consensus_bms:
+        points = _spread_alt_points_from_bm(bm, market_key, settings.devig_method)
+        if points:
+            basket_keys.append(bm["key"])
+            basket_points.append(points)
+    basket_curve = (
+        build_curve(basket_points, aggregate="median")
+        if len(basket_keys) >= settings.min_consensus_books
+        else None
+    )
+
+    pinnacle_ok = (
+        pinnacle_bm is not None
+        and is_fresh(pinnacle_bm, now, settings.sharp_max_staleness_minutes)
+    )
+    if pinnacle_ok:
+        sharp_curve = _spread_alt_points_from_bm(pinnacle_bm, market_key, settings.devig_method)
+        if sharp_curve:
+            if basket_curve is not None:
+                sharp_curve = merge_curve_anchors(sharp_curve, basket_curve)
+            return _curve_lookup(sharp_curve, "pinnacle")
+
+    if basket_curve is None:
+        return None
+    return _curve_lookup(basket_curve, ",".join(sorted(basket_keys)))
 
 
 def _curve_lookup(

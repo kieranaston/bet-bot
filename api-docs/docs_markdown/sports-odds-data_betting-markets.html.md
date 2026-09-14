@@ -1,6 +1,10 @@
+<!-- Source: https://the-odds-api.com/sports-odds-data/betting-markets.html -->
+
 Title: List of API Betting Markets
 
 URL Source: https://the-odds-api.com/sports-odds-data/betting-markets.html
+
+Published Time: Mon, 31 Aug 2026 04:43:20 GMT
 
 Markdown Content:
 The Odds API covers the betting markets listed below.

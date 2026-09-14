@@ -16,9 +16,10 @@ ev:
   # variance, and even the improved devig below is less trustworthy the further a line
   # sits from a pick'em (thinner liquidity, more room for a book's own pricing noise), so
   # extreme-longshot "+EV" bets are both higher-variance and less trustworthy than they
-  # look. 0.25 excludes anything with fair odds longer than about +300 American; doesn't
-  # affect favorites, only longshots.
-  min_true_prob: 0.25
+  # look. 0.20 excludes anything with fair odds longer than about +400 American; doesn't
+  # affect favorites, only longshots. Relaxed from 0.25 (2026-09-14) after confirming
+  # multi-line alt devig was collapsing true probs into the longshot band artificially.
+  min_true_prob: 0.20
   # Devig method for turning sharp odds into "true" probabilities. "additive" is what
   # `betbot.devig` actually implements for the two-outcome case (moneyline, spreads,
   # totals, all player props, all alternate-line markets): true_prob_i = implied_i -
@@ -102,7 +103,7 @@ sports:
   #
   # Market selection per sport follows the docs' own reliability caveat: "spreads and totals
   # markets are mainly available for US sports and bookmakers at this time" (api-docs/
-  # docs_markdown/liveapi_guides_v4.md). Unlike the per-event odds endpoint, the plain /odds
+  # docs_markdown/liveapi_guides_v4_index.html.md). Unlike the per-event odds endpoint, the plain /odds
   # endpoint used for real scans charges for every REQUESTED market regardless of whether any
   # bookmaker actually returns data for it -- so requesting a market Pinnacle doesn't reliably
   # price there isn't just a missed signal, it's wasted spend every scan. NCAAF/NCAAB are
@@ -226,20 +227,20 @@ props:
   # re-checked roughly every 15 min once inside this window -- free until real data
   # appears, then costs credits for however many checks remain until kickoff, so keep this
   # tight rather than generous.
-  pregame_window_hours: 3
+  pregame_window_hours: 4
   # Outer safety bound only now -- pregame_window_hours above does the real filtering.
   max_hours_ahead: 48
   # Hard safety ceiling so one heavy game day (e.g. a busy MLB slate) can't blow the
   # monthly budget in a single scan even with pregame_window_hours filtering -- events are
   # processed in commence-time order, nearest first.
   max_events_per_scan_per_sport: 8
-  # Higher bar than ev.min_ev_pct (2.0): PLAYER props' "true" line is an average across
+  # Higher bar than ev.min_ev_pct (2.0), but relaxed from 5.0→3.0 (2026-09-14): PLAYER props' "true" line is an average across
   # non-Ontario US books (config/bookmakers.yaml `consensus:`), not Pinnacle -- a noisier
   # reference than a genuinely sharp book, so expect a higher false-positive rate at the
   # same EV% and compensate with a higher floor. Does NOT apply to `game_alt_markets:` --
   # those devig against Pinnacle directly (same as main markets) and use ev.min_ev_pct
   # (2.0) instead, since that reference is just as sharp as any main-market alert's.
-  min_ev_pct: 5.0
+  min_ev_pct: 3.0
   # Cost estimate: genuinely harder to pin to one ceiling number than the old fixed-slot
   # schedule, since it now depends on how game start-times cluster within
   # pregame_window_hours rather than a flat scans/day x markets formula. Launch with these
