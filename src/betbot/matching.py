@@ -8,14 +8,11 @@ CLAUDE.md's "Sharp reference selection" section):
    gaps are an expected characteristic of the feed, not just a rare fluke -- live-verified
    2026-09-14 that Pinnacle returned zero data for every configured sport that day).
 2. No longer requiring a book's line to match the reference at the *exact* same point --
-   spreads/totals/alternates routinely disagree by half a point between books, which made the
-   old exact-match requirement a much stricter filter for those markets than for moneyline
-   (which has no point at all).
-
-When Pinnacle is fresh, its own points still win at exact matches; consensus-book points the
-sharp book doesn't quote are merged in as interpolation anchors so an Ontario half-point
-mismatch can still resolve (the design intent of #2 above -- without that merge, a
-single-line fresh Pinnacle forced exact match again).
+   spreads/totals/alternates routinely disagree by half a point between books. Interpolation
+   only uses points from *one* coherent reference (fresh Pinnacle alone, or the median
+   consensus basket alone). Do not mix soft-book points into a Pinnacle curve as extra
+   anchors -- that produced non-monotonic true probs on alt spreads (e.g. a favorite -8.5
+   priced as more likely than -8).
 """
 from __future__ import annotations
 
@@ -114,27 +111,6 @@ def build_curve(
     return curve
 
 
-def merge_curve_anchors(
-    primary: dict[object, list[tuple[float | None, float]]],
-    secondary: dict[object, list[tuple[float | None, float]]],
-) -> dict[object, list[tuple[float | None, float]]]:
-    """Keep primary probs at its observed points; add secondary points the primary doesn't
-    have so true_prob_at can interpolate (e.g. fresh Pinnacle at -3.0 plus a consensus book
-    at -4.0 bracketing an Ontario -3.5). Never overwrites a primary observation."""
-    out: dict[object, list[tuple[float | None, float]]] = {
-        key: list(observations) for key, observations in primary.items()
-    }
-    for key, observations in secondary.items():
-        have = {point for point, _ in out.get(key, [])}
-        extras = [(point, prob) for point, prob in observations if point not in have]
-        if not extras:
-            continue
-        merged = out.get(key, []) + extras
-        merged.sort(key=lambda x: (x[0] is not None, x[0] if x[0] is not None else 0.0))
-        out[key] = merged
-    return out
-
-
 def select_reference(
     sharp_bm: dict | None,
     sharp_outcomes: list[tuple[object, float | None, float]] | None,
@@ -150,8 +126,9 @@ def select_reference(
     if its bookmaker entry is present, fresh (is_fresh), and actually has this market
     (sharp_outcomes not None/empty) -- otherwise a median basket of whichever consensus
     books (config/bookmakers.yaml `consensus:`) also have it, if at least
-    `min_consensus_books` distinct ones do. When Pinnacle is usable, consensus points it
-    doesn't quote are still merged in as interpolation anchors (label stays the sharp key).
+    `min_consensus_books` distinct ones do. Interpolation stays within that single chosen
+    reference -- never mixes Pinnacle points with soft-book points on one curve (that
+    produced non-monotonic alt-spread true probs).
 
     `pair_by_line=True` uses book_points_by_line (required for alternate_totals / team_totals
     / alternate_team_totals ladders). Featured markets keep the default joint book_points.
@@ -161,6 +138,11 @@ def select_reference(
     Returns None if neither reference is usable."""
     points_fn = book_points_by_line if pair_by_line else book_points
 
+    if sharp_bm is not None and sharp_outcomes and is_fresh(sharp_bm, now, max_staleness_minutes):
+        sharp_points = points_fn(sharp_outcomes, devig_method)
+        if sharp_points:
+            return build_curve([sharp_points], aggregate="mean"), sharp_bm["key"]
+
     basket_keys: list[str] = []
     basket_points_list: list[dict[object, list[tuple[float | None, float]]]] = []
     for book_key, outcomes in basket_candidates:
@@ -169,23 +151,9 @@ def select_reference(
             basket_keys.append(book_key)
             basket_points_list.append(points)
 
-    basket_curve = (
-        build_curve(basket_points_list, aggregate="median")
-        if len(basket_keys) >= min_consensus_books
-        else None
-    )
-
-    if sharp_bm is not None and sharp_outcomes and is_fresh(sharp_bm, now, max_staleness_minutes):
-        sharp_points = points_fn(sharp_outcomes, devig_method)
-        if sharp_points:
-            curve = build_curve([sharp_points], aggregate="mean")
-            if basket_curve is not None:
-                curve = merge_curve_anchors(curve, basket_curve)
-            return curve, sharp_bm["key"]
-
-    if basket_curve is None:
+    if len(basket_keys) < min_consensus_books:
         return None
-    return basket_curve, ",".join(sorted(basket_keys))
+    return build_curve(basket_points_list, aggregate="median"), ",".join(sorted(basket_keys))
 
 
 def true_prob_at(

@@ -1,14 +1,13 @@
-"""Scan-time gating and adaptive re-alert cooldown.
+"""Scan-time gating for when to spend Odds API credits.
 
-The GitHub Actions cron in .github/workflows/betbot-scan.yml ticks a couple of times an hour so
-Telegram commands stay responsive, but we only want to actually spend Odds API credits a
-few times a day. `is_scan_time` decides that using real Eastern clock time (DST-aware, via
-zoneinfo) so the schedule stays correct across the November/March clock changes without
-anyone having to edit a cron expression.
+The VPS poll loop (and optional GitHub Actions backup) ticks far more often than we want
+to hit The Odds API. `current_scan_window_key` / `is_scan_time` decide that using real
+Eastern clock time (DST-aware, via zoneinfo) so the schedule stays correct across the
+November/March clock changes without anyone having to edit a cron expression.
 
-`should_alert` is a separate concern: once we *do* scan, this controls how often we'll
-re-notify about the same still-open opportunity between scans -- tighter cooldowns for
-games about to start, looser for games far out.
+Re-alerting a still-+EV line is no longer cooldown-gated: once a scan finds a candidate
+that clears the EV floor, main._upsert_and_maybe_notify always notifies unless the user
+already /placed, /skip'd, or settled that alert identity.
 """
 from __future__ import annotations
 
@@ -38,26 +37,3 @@ def is_scan_time(
     now_utc: dt.datetime, scan_times_local: list[str], timezone: str, window_minutes: int
 ) -> bool:
     return current_scan_window_key(now_utc, scan_times_local, timezone, window_minutes) is not None
-
-
-def cooldown_minutes_for(hours_to_commence: float, tiers: list[dict]) -> float:
-    for tier in tiers:  # tiers is pre-sorted ascending by max_hours_to_commence
-        if hours_to_commence <= tier["max_hours_to_commence"]:
-            return float(tier["cooldown_minutes"])
-    return float(tiers[-1]["cooldown_minutes"])
-
-
-def should_alert(
-    hours_to_commence: float,
-    tiers: list[dict],
-    last_alerted_at: dt.datetime | None,
-    now: dt.datetime,
-    price_changed: bool,
-) -> bool:
-    if last_alerted_at is None:
-        return True
-    if price_changed:
-        return True
-    cooldown = cooldown_minutes_for(hours_to_commence, tiers)
-    elapsed_minutes = (now - last_alerted_at).total_seconds() / 60.0
-    return elapsed_minutes >= cooldown

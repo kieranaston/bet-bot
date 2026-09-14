@@ -658,9 +658,10 @@ def test_process_prop_event_team_totals_two_teams_devig_independently():
         assert all(a.true_prob == pytest.approx(0.5) for a in alerts)
 
 
-def test_process_event_fresh_pinnacle_uses_basket_anchors_to_interpolate():
-    """Fresh Pinnacle at -3.0 alone cannot bracket Ontario -3.5; a consensus book at -4.0
-    should be merged as an interpolation anchor so the line still resolves."""
+def test_process_event_fresh_pinnacle_does_not_use_cross_book_anchors():
+    """Fresh Pinnacle at -3.0 alone cannot bracket Ontario -3.5; we no longer splice
+    consensus -4.0 onto that curve, so the line is skipped rather than inventing a
+    mixed-book true prob."""
     db = Database("sqlite:///:memory:")
     telegram = MagicMock()
     now = dt.datetime.now(dt.timezone.utc)
@@ -704,13 +705,70 @@ def test_process_event_fresh_pinnacle_uses_basket_anchors_to_interpolate():
         bankroll=1000.0, now=now,
     )
 
-    assert sent == 1
-    with db.session() as s:
-        alert = s.query(Alert).one()
-        assert alert.point == -3.5
-        assert alert.true_prob == pytest.approx(0.5)
-        assert alert.sharp_book_key == "pinnacle"
+    assert sent == 0
 
+
+def test_process_prop_event_alt_spread_true_prob_monotone_with_line():
+    """Favorite covering a larger number is less likely -- true_prob(-8.5) < true_prob(-8).
+    Regression for mixing soft-book anchors into Pinnacle's ladder, which inverted this."""
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    now = dt.datetime.now(dt.timezone.utc)
+
+    # Pinnacle ladder: favorite harder lines get longer prices (lower true prob after degig)
+    pinnacle = _prop_bookmaker(
+        "pinnacle",
+        "alternate_spreads",
+        [
+            {"name": "Chiefs", "point": -7.5, "price": 2.40},
+            {"name": "Broncos", "point": 7.5, "price": 1.61},
+            {"name": "Chiefs", "point": -8.0, "price": 2.55},
+            {"name": "Broncos", "point": 8.0, "price": 1.55},
+            {"name": "Chiefs", "point": -8.5, "price": 2.70},
+            {"name": "Broncos", "point": 8.5, "price": 1.50},
+            {"name": "Chiefs", "point": -9.0, "price": 2.90},
+            {"name": "Broncos", "point": 9.0, "price": 1.45},
+        ],
+    )
+    # Soft books with inverted/noisy mid points that would break a mixed curve
+    fanduel = _prop_bookmaker(
+        "fanduel",
+        "alternate_spreads",
+        [
+            {"name": "Chiefs", "point": -8.0, "price": 1.80},
+            {"name": "Broncos", "point": 8.0, "price": 2.10},
+            {"name": "Chiefs", "point": -8.5, "price": 3.50},
+            {"name": "Broncos", "point": 8.5, "price": 1.30},
+        ],
+    )
+    draftkings = _prop_bookmaker(
+        "draftkings",
+        "alternate_spreads",
+        [
+            {"name": "Chiefs", "point": -8.0, "price": 1.85},
+            {"name": "Broncos", "point": 8.0, "price": 2.05},
+            {"name": "Chiefs", "point": -8.5, "price": 3.40},
+            {"name": "Broncos", "point": 8.5, "price": 1.32},
+        ],
+    )
+    ontario = _prop_bookmaker(
+        "sportsinteraction_ca_on",
+        "alternate_spreads",
+        [
+            {"name": "Chiefs", "point": -8.0, "price": 3.75},   # +275
+            {"name": "Chiefs", "point": -8.5, "price": 3.90},   # +290
+        ],
+    )
+    event = _event([pinnacle, fanduel, draftkings, ontario])
+
+    sent = process_prop_event(
+        db, telegram, event, "americanfootball_nfl", [],
+        bankroll=1000.0, now=now, game_alt_markets=["alternate_spreads"],
+    )
+    assert sent == 2
+    with db.session() as s:
+        by_point = {a.point: a for a in s.query(Alert).all()}
+        assert by_point[-8.5].true_prob < by_point[-8.0].true_prob
 
 def test_process_prop_event_interpolates_player_prop_across_consensus_points():
     """Ontario posts 24.5 while consensus books only quote 24.0 and 25.0 -- should
@@ -813,3 +871,83 @@ def test_process_prop_event_alternate_spreads_falls_back_to_basket_when_pinnacle
     with db.session() as s:
         alert = s.query(Alert).one()
         assert alert.sharp_book_key == "draftkings,fanduel"
+
+
+def test_process_event_realerts_same_line_without_cooldown_when_still_plus_ev():
+    """A notified alert that is still +EV on the next scan must re-ping immediately -- no
+    cooldown and no requirement that Ontario price moved."""
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    now = dt.datetime.now(dt.timezone.utc)
+
+    sharp = _bookmaker(
+        "pinnacle", [{"name": "Home Team", "price": 1.91}, {"name": "Away Team", "price": 1.91}]
+    )
+    book = _bookmaker(
+        "bet99_ca_on", [{"name": "Home Team", "price": 2.20}, {"name": "Away Team", "price": 1.75}]
+    )
+    event = _event([sharp, book])
+
+    assert process_event(db, telegram, event, "americanfootball_nfl", ["h2h"], 1000.0, now) == 1
+    assert telegram.send_message.call_count == 1
+
+    # Same prices moments later -- previously blocked by cooldown; must send again.
+    later = now + dt.timedelta(minutes=2)
+    assert process_event(db, telegram, event, "americanfootball_nfl", ["h2h"], 1000.0, later) == 1
+    assert telegram.send_message.call_count == 2
+    with db.session() as s:
+        alert = s.query(Alert).one()
+        assert alert.status == "notified"
+        assert alert.last_alerted_at == later
+
+
+def test_process_event_does_not_realert_after_skip():
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    now = dt.datetime.now(dt.timezone.utc)
+
+    sharp = _bookmaker(
+        "pinnacle", [{"name": "Home Team", "price": 1.91}, {"name": "Away Team", "price": 1.91}]
+    )
+    book = _bookmaker(
+        "bet99_ca_on", [{"name": "Home Team", "price": 2.20}, {"name": "Away Team", "price": 1.75}]
+    )
+    event = _event([sharp, book])
+
+    assert process_event(db, telegram, event, "americanfootball_nfl", ["h2h"], 1000.0, now) == 1
+    with db.session() as s:
+        s.query(Alert).one().status = "skipped"
+
+    assert process_event(
+        db, telegram, event, "americanfootball_nfl", ["h2h"], 1000.0, now + dt.timedelta(minutes=2)
+    ) == 0
+    assert telegram.send_message.call_count == 1
+
+
+def test_process_event_no_send_when_line_no_longer_plus_ev_and_not_marked_skipped():
+    """If sharp moves so the Ontario price is no longer +EV, we stop pinging but leave the
+    row as notified (not skipped) so a later return to +EV can alert again."""
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    now = dt.datetime.now(dt.timezone.utc)
+
+    sharp = _bookmaker(
+        "pinnacle", [{"name": "Home Team", "price": 1.91}, {"name": "Away Team", "price": 1.91}]
+    )
+    book = _bookmaker(
+        "bet99_ca_on", [{"name": "Home Team", "price": 2.20}, {"name": "Away Team", "price": 1.75}]
+    )
+    event = _event([sharp, book])
+    assert process_event(db, telegram, event, "americanfootball_nfl", ["h2h"], 1000.0, now) == 1
+
+    # Ontario price collapses to no longer +EV vs the same sharp line.
+    book["markets"][0]["outcomes"] = [
+        {"name": "Home Team", "price": 1.85},
+        {"name": "Away Team", "price": 2.00},
+    ]
+    later = now + dt.timedelta(minutes=2)
+    assert process_event(db, telegram, event, "americanfootball_nfl", ["h2h"], 1000.0, later) == 0
+    assert telegram.send_message.call_count == 1
+    with db.session() as s:
+        alert = s.query(Alert).one()
+        assert alert.status == "notified"  # not skipped

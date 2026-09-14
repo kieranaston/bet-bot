@@ -3,7 +3,7 @@ import datetime as dt
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from betbot.storage import Alert, Database, american_odds
+from betbot.storage import Alert, Database, american_odds, parse_to_decimal_odds
 
 
 def test_american_odds_favorite():
@@ -21,6 +21,25 @@ def test_american_odds_underdog():
 
 def test_american_odds_even_money_boundary():
     assert american_odds(2.0) == "+100"
+
+
+def test_parse_to_decimal_odds_american_positive():
+    assert parse_to_decimal_odds("+290") == pytest.approx(3.90)
+
+
+def test_parse_to_decimal_odds_american_negative():
+    assert parse_to_decimal_odds("-110") == pytest.approx(1.0 + 100 / 110)
+
+
+def test_parse_to_decimal_odds_decimal():
+    assert parse_to_decimal_odds("2.50") == pytest.approx(2.50)
+
+
+def test_parse_to_decimal_odds_rejects_junk():
+    with pytest.raises(ValueError):
+        parse_to_decimal_odds("abc")
+    with pytest.raises(ValueError):
+        parse_to_decimal_odds("0.5")
 
 
 def test_alert_book_odds_display_uses_american_odds():
@@ -97,8 +116,9 @@ def test_alert_uniqueness_still_rejects_true_duplicate():
 
 def test_datetime_columns_stay_timezone_aware_through_sqlite():
     """Regression test: plain DateTime(timezone=True) silently comes back naive from
-    SQLite, which crashes should_alert()'s (now - last_alerted_at) the moment a bet gets
-    re-evaluated on a later scan. AwareDateTime must prevent that on every datetime column."""
+    SQLite, which crashes aware datetime math (now - last_alerted_at) the moment a bet
+    gets re-evaluated on a later scan. AwareDateTime must prevent that on every datetime
+    column."""
     db = Database("sqlite:///:memory:")
     commence = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=3)
     alerted = dt.datetime.now(dt.timezone.utc)

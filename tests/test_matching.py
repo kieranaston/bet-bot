@@ -176,17 +176,9 @@ def test_book_points_by_line_devigs_each_total_line_independently():
         assert prob == pytest.approx(0.5)
 
 
-def test_merge_curve_anchors_keeps_primary_and_adds_missing_points():
-    from betbot.matching import merge_curve_anchors, true_prob_at
-
-    primary = {"Home": [(-3.0, 0.55)]}
-    secondary = {"Home": [(-4.0, 0.60), (-3.0, 0.50)]}  # -3.0 must not overwrite primary
-    merged = merge_curve_anchors(primary, secondary)
-    assert merged["Home"] == [(-4.0, 0.60), (-3.0, 0.55)]
-    assert true_prob_at(merged["Home"], -3.5) == pytest.approx(0.575)
-
-
-def test_select_reference_merges_basket_anchors_when_pinnacle_fresh():
+def test_select_reference_fresh_pinnacle_does_not_mix_basket_points():
+    """Fresh Pinnacle with only -3.0 must not splice soft-book -4.0 onto the curve --
+    Ontario -3.5 is therefore unresolvable (no extrapolate / no cross-book anchors)."""
     now = dt.datetime.now(dt.timezone.utc)
     sharp_bm = _bm("pinnacle")
     sharp_outcomes = [("Home", -3.0, 1.91), ("Away", 3.0, 1.91)]
@@ -201,5 +193,5 @@ def test_select_reference_merges_basket_anchors_when_pinnacle_fresh():
     assert selection is not None
     curve, label = selection
     assert label == "pinnacle"
-    # Ontario -3.5 is bracketed by Pinnacle -3.0 and basket -4.0
-    assert true_prob_at(curve["Home"], -3.5) == pytest.approx(0.5)
+    assert [p for p, _ in curve["Home"]] == [-3.0]
+    assert true_prob_at(curve["Home"], -3.5) is None

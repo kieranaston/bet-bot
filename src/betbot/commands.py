@@ -1,7 +1,9 @@
 """Parse and apply Telegram commands the user sends in reply to alerts.
 
 Supported commands:
-  /placed <alert_id> [stake]   Mark a bet as placed (defaults to the recommended stake).
+  /placed <alert_id> [stake odds]  Mark a bet as placed. With no extras, uses recommended
+                                stake and the alert's stored odds. To override, pass BOTH
+                                stake and odds (American +290/-110 or decimal 3.90).
   /skip <alert_id>             Mark an alert as skipped (won't be re-alerted).
   /settle <alert_id> win|loss|push Grade a placed bet and update bankroll.
   /bankroll [amount]           Show current bankroll, or set it manually.
@@ -22,16 +24,19 @@ from betbot import settlement
 from betbot.config import Settings
 from betbot.odds_client import OddsApiClient
 from betbot.performance import build_report_lines
-from betbot.storage import Alert, Database, local_time_str
+from betbot.storage import Alert, Database, local_time_str, parse_to_decimal_odds
 from betbot.telegram import TelegramClient
 
 logger = logging.getLogger(__name__)
 
 SCAN_COOLDOWN_MINUTES = 5  # protects Odds API quota from an accidental repeated /scan
 
+_PLACED_USAGE = "Usage: /placed <alert_id> [stake odds]"
+
 HELP_TEXT = (
     "*Commands*\n"
-    "`/placed <id> stake` — mark a bet placed (defaults to recommended stake)\n"
+    "`/placed <id>` — mark placed at recommended stake & alert odds\n"
+    "`/placed <id> <stake> <odds>` — same, with your stake & American/decimal odds\n"
     "`/skip <id>` — dismiss an alert\n"
     "`/settle <id> win|loss|push` — grade a bet & update bankroll\n"
     "`/bankroll amount` — show or set current bankroll\n"
@@ -135,15 +140,36 @@ def _get_alert(session, alert_id: int) -> Alert | None:
     return session.get(Alert, alert_id)
 
 
+def _parse_placed_extras(tokens: list[str]) -> tuple[float | None, float | None]:
+    """Parse optional stake+odds after the alert id. Returns (stake, decimal_odds).
+
+    Either both omitted (use alert defaults) or both provided -- a single extra arg is
+    rejected because decimal odds (3.90) are ambiguous with stake dollars.
+    """
+    if not tokens:
+        return None, None
+    if len(tokens) == 1:
+        raise ValueError("provide both stake and odds, or neither")
+    if len(tokens) > 2:
+        raise ValueError("too many arguments")
+    return float(tokens[0]), parse_to_decimal_odds(tokens[1])
+
+
 def _cmd_placed(db: Database, settings: Settings, args: list[str]) -> str:
     if not args:
-        return "Usage: /placed <alert_id> [stake]"
+        return _PLACED_USAGE
     alert_id = int(args[0])
+    try:
+        stake_arg, odds_arg = _parse_placed_extras(args[1:])
+    except ValueError as exc:
+        return f"Could not parse stake/odds: {exc}. {_PLACED_USAGE}"
     with db.session() as s:
         alert = _get_alert(s, alert_id)
         if not alert:
             return f"No alert #{alert_id} found."
-        stake = float(args[1]) if len(args) > 1 else alert.recommended_stake
+        stake = stake_arg if stake_arg is not None else alert.recommended_stake
+        if odds_arg is not None:
+            alert.book_odds = odds_arg
         alert.status = "placed"
         alert.placed_stake = stake
         return (

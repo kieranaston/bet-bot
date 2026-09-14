@@ -125,12 +125,6 @@ class Settings:
         return int(self._raw["scheduling"]["scan_window_minutes"])
 
     @property
-    def scheduling_tiers(self) -> list[dict[str, Any]]:
-        return sorted(
-            self._raw["scheduling"]["tiers"], key=lambda t: t["max_hours_to_commence"]
-        )
-
-    @property
     def max_hours_ahead(self) -> float:
         return float(self._raw["scheduling"]["max_hours_ahead"])
 

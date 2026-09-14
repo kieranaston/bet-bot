@@ -1,6 +1,8 @@
 import datetime as dt
 from types import SimpleNamespace
 
+import pytest
+
 from betbot import commands
 from betbot.storage import Alert, Database, local_time_str
 
@@ -115,7 +117,9 @@ def test_placed_no_args_shows_usage():
     settings = _fake_settings()
     telegram = _fake_telegram()
     odds_client = _fake_odds_client()
-    assert commands._dispatch(db, settings, telegram, odds_client, "/placed") == "Usage: /placed <alert_id> [stake]"
+    assert commands._dispatch(db, settings, telegram, odds_client, "/placed") == (
+        "Usage: /placed <alert_id> [stake odds]"
+    )
 
 
 def test_placed_unknown_alert():
@@ -144,7 +148,8 @@ def test_placed_defaults_to_recommended_stake_and_shows_point():
         assert alert.placed_stake == 40.0
 
 
-def test_placed_with_explicit_stake():
+def test_placed_stake_only_rejected():
+    """A single extra arg is ambiguous (stake vs decimal odds) -- require both or neither."""
     db = _db()
     settings = _fake_settings()
     telegram = _fake_telegram()
@@ -152,10 +157,80 @@ def test_placed_with_explicit_stake():
     alert_id = _insert_alert(db)
 
     reply = commands._dispatch(db, settings, telegram, odds_client, f"/placed {alert_id} 75")
-
-    assert "for $75.00" in reply
+    assert reply.startswith("Could not parse stake/odds: provide both stake and odds")
     with db.session() as s:
-        assert s.get(Alert, alert_id).placed_stake == 75.0
+        assert s.get(Alert, alert_id).status != "placed"
+
+
+def test_placed_odds_only_rejected():
+    db = _db()
+    settings = _fake_settings()
+    telegram = _fake_telegram()
+    odds_client = _fake_odds_client()
+    alert_id = _insert_alert(db)
+
+    reply = commands._dispatch(db, settings, telegram, odds_client, f"/placed {alert_id} +290")
+    assert reply.startswith("Could not parse stake/odds: provide both stake and odds")
+
+
+def test_placed_with_stake_and_decimal_odds():
+    db = _db()
+    settings = _fake_settings()
+    telegram = _fake_telegram()
+    odds_client = _fake_odds_client()
+    alert_id = _insert_alert(db)
+
+    reply = commands._dispatch(db, settings, telegram, odds_client, f"/placed {alert_id} 55 3.90")
+
+    assert "@ +290" in reply
+    assert "for $55.00" in reply
+    with db.session() as s:
+        alert = s.get(Alert, alert_id)
+        assert alert.placed_stake == 55.0
+        assert alert.book_odds == pytest.approx(3.90)
+
+
+def test_placed_with_stake_and_american_odds():
+    db = _db()
+    settings = _fake_settings()
+    telegram = _fake_telegram()
+    odds_client = _fake_odds_client()
+    alert_id = _insert_alert(db, book_odds=2.05)
+
+    reply = commands._dispatch(db, settings, telegram, odds_client, f"/placed {alert_id} 40 +290")
+
+    assert "@ +290" in reply
+    assert "for $40.00" in reply
+    with db.session() as s:
+        alert = s.get(Alert, alert_id)
+        assert alert.status == "placed"
+        assert alert.placed_stake == 40.0
+        assert alert.book_odds == pytest.approx(3.90)
+
+
+def test_placed_with_negative_american_odds():
+    db = _db()
+    settings = _fake_settings()
+    telegram = _fake_telegram()
+    odds_client = _fake_odds_client()
+    alert_id = _insert_alert(db)
+
+    reply = commands._dispatch(db, settings, telegram, odds_client, f"/placed {alert_id} 25 -110")
+
+    assert "@ -110" in reply
+    with db.session() as s:
+        assert s.get(Alert, alert_id).book_odds == pytest.approx(1.0 + 100 / 110)
+
+
+def test_placed_invalid_odds_reports_error():
+    db = _db()
+    settings = _fake_settings()
+    telegram = _fake_telegram()
+    odds_client = _fake_odds_client()
+    alert_id = _insert_alert(db)
+
+    reply = commands._dispatch(db, settings, telegram, odds_client, f"/placed {alert_id} 25 nope")
+    assert reply.startswith("Could not parse stake/odds:")
 
 
 def test_placed_non_integer_id_reports_error_without_crashing():

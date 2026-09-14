@@ -66,10 +66,10 @@ class AwareDateTime(TypeDecorator):
     """DateTime(timezone=True) doesn't actually round-trip tzinfo through SQLite -- it has
     no native timezone-aware type, so a stored aware datetime silently comes back naive
     (confirmed: tzinfo is None after a commit+reload). That crashes the very first
-    naive-vs-aware subtraction against an aware "now" (e.g. scheduler.should_alert comparing
-    against a previously-alerted Alert's last_alerted_at), which only bit us once alerts
-    started actually being re-evaluated across scans on the VPS's local SQLite DB -- it
-    never showed up under Postgres, which preserves tzinfo correctly. Always returns a
+    naive-vs-aware subtraction against an aware "now" (e.g. comparing against a previously
+    alerted Alert's last_alerted_at), which only bit us once alerts started actually being
+    re-evaluated across scans on the VPS's local SQLite DB -- it never showed up under
+    Postgres, which preserves tzinfo correctly. Always returns a
     UTC-aware datetime on read regardless of backend, so callers never have to think about
     which DB is behind DATABASE_URL."""
 
@@ -191,6 +191,30 @@ def american_odds(decimal_odds: float) -> str:
     if decimal_odds >= 2.0:
         return f"+{round((decimal_odds - 1) * 100):.0f}"
     return f"{round(-100 / (decimal_odds - 1)):.0f}"
+
+
+def parse_to_decimal_odds(raw: str) -> float:
+    """Parse a user-supplied odds string as American (+150, -110) or decimal (2.50).
+    Raises ValueError on junk / non-positive / <=1.0 decimal results."""
+    text = raw.strip().replace(",", "")
+    if not text:
+        raise ValueError("odds value is empty")
+    if text[0] in "+-" and len(text) > 1:
+        try:
+            american = float(text)
+        except ValueError as exc:
+            raise ValueError(f"invalid American odds: {raw!r}") from exc
+        if american == 0:
+            raise ValueError("American odds cannot be 0")
+        decimal = 1.0 + american / 100.0 if american > 0 else 1.0 + 100.0 / abs(american)
+    else:
+        try:
+            decimal = float(text)
+        except ValueError as exc:
+            raise ValueError(f"invalid odds: {raw!r}") from exc
+    if decimal <= 1.0:
+        raise ValueError(f"decimal odds must be > 1.0, got {decimal}")
+    return decimal
 
 
 class Database:

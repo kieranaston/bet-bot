@@ -181,23 +181,6 @@ scheduling:
   scan_times_local: ["10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00", "21:00", "22:00", "23:00"]
   scan_window_minutes: 60
 
-  # Adaptive re-alert cooldown tiers, keyed by hours-to-commence -> minimum minutes between
-  # re-alerting the *same* (event, market, bookmaker, outcome) unless the price moves. These
-  # are real-elapsed-time throttles, independent of the scan gap above -- with the current
-  # 1-hour gap, the <=1h tier (60 min cooldown) still re-alerts almost every scan as
-  # intended (more frequent reminders as the decision deadline approaches), while the
-  # <=6h/<=24h/>24h tiers now skip roughly 3x/6x/12x as many scans between re-alerts as they
-  # did at the old 3-hour gap -- not re-tuned for that yet, since fewer/gentler reminders on
-  # a lower-urgency bet isn't obviously wrong, just untested against the new cadence.
-  tiers:
-    - max_hours_to_commence: 1
-      cooldown_minutes: 60
-    - max_hours_to_commence: 6
-      cooldown_minutes: 180
-    - max_hours_to_commence: 24
-      cooldown_minutes: 360
-    - max_hours_to_commence: 999999
-      cooldown_minutes: 720
   # Don't bother processing events further out than this -- lines aren't liquid/final yet
   # and re-checking them wastes API credits.
   max_hours_ahead: 168   # 7 days

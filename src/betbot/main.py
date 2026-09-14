@@ -22,20 +22,17 @@ from betbot.kelly import stake_amount
 from betbot.matching import (
     build_curve,
     is_fresh,
-    merge_curve_anchors,
     select_reference,
     true_prob_at,
 )
 from betbot.odds_client import OddsApiClient, OddsApiError
 from betbot.performance import build_report_lines
-from betbot.scheduler import current_scan_window_key, should_alert
+from betbot.scheduler import current_scan_window_key
 from betbot.storage import Alert, Database, local_time_str
 from betbot.telegram import TelegramClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("betbot.main")
-
-PRICE_CHANGE_EPSILON = 0.02  # decimal odds points; smaller moves don't count as "changed"
 
 MARKET_LABELS = {
     "h2h": "ML", "spreads": "Spread", "totals": "Total",
@@ -188,7 +185,6 @@ def process_event(
                 ev=ev,
                 stake=stake,
                 commence_time=commence_time,
-                hours_to_commence=hours_to_commence,
                 now=now,
                 sharp_book_key=sharp_book_key,
             )
@@ -210,11 +206,14 @@ def _upsert_and_maybe_notify(
     ev: float,
     stake: float,
     commence_time: dt.datetime,
-    hours_to_commence: float,
     now: dt.datetime,
     sharp_book_key: str,
     participant: str = "",
 ) -> int:
+    """Persist a still-+EV candidate and Telegram-notify. No cooldown: every scan that
+    re-confirms +EV against the current sharp reference re-pings, unless the user already
+    /placed, /skip'd, or settled this alert identity. Lines that fall below the EV floor
+    never reach this function, so they go quiet without being marked skipped."""
     with db.session() as s:
         existing = (
             s.query(Alert)
@@ -250,28 +249,18 @@ def _upsert_and_maybe_notify(
                 status="new",
             )
             s.add(alert)
-            price_changed = True
         else:
             if existing.status in (
                 "placed", "skipped", "settled_win", "settled_loss", "settled_push",
             ):
                 return 0  # user already acted on this -- don't re-alert
-            price_changed = abs(existing.book_odds - price) >= PRICE_CHANGE_EPSILON
             existing.book_odds = price
             existing.deep_link = deep_link
             existing.true_prob = true_prob
             existing.ev_pct = ev
             existing.recommended_stake = stake
+            existing.sharp_book_key = sharp_book_key
             alert = existing
-
-        if not should_alert(
-            hours_to_commence=hours_to_commence,
-            tiers=settings.scheduling_tiers,
-            last_alerted_at=alert.last_alerted_at,
-            now=now,
-            price_changed=price_changed,
-        ):
-            return 0
 
         s.flush()  # ensure alert.id is populated for new rows
         _send_alert_message(telegram, alert)
@@ -465,7 +454,7 @@ def _spread_alt_points_from_bm(
     bm: dict, market_key: str, devig_method: str
 ) -> dict[tuple[str | None, str], list[tuple[float | None, float]]]:
     """Convert _devig_spread_alternates flat lookup into a (None, team)-keyed curve dict
-    suitable for build_curve / merge_curve_anchors / _curve_lookup."""
+    suitable for build_curve / _curve_lookup."""
     raw = _devig_spread_alternates(bm, market_key, devig_method)
     curve: dict[tuple[str | None, str], list[tuple[float | None, float]]] = defaultdict(list)
     for (name, point), prob in raw.items():
@@ -486,7 +475,6 @@ def _alert_on_matched_lines(
     min_ev_pct: float,
     bankroll: float,
     commence_time: dt.datetime,
-    hours_to_commence: float,
     now: dt.datetime,
 ) -> int:
     """Shared best-price-selection + alerting for one already-devigged additional market --
@@ -549,7 +537,6 @@ def _alert_on_matched_lines(
             ev=ev,
             stake=stake,
             commence_time=commence_time,
-            hours_to_commence=hours_to_commence,
             now=now,
             sharp_book_key=contributing_books,
             participant=description or "",
@@ -607,7 +594,7 @@ def process_prop_event(
             )
             alerts_sent += _alert_on_matched_lines(
                 db, telegram, event, sport_key, market_key, ontario_bms, sharp_lookup,
-                settings.props_min_ev_pct, bankroll, commence_time, hours_to_commence, now,
+                settings.props_min_ev_pct, bankroll, commence_time, now,
             )
 
     pinnacle_bm = next((bm for bm in bookmakers if bm["key"] in settings.sharp_book_keys), None)
@@ -657,7 +644,7 @@ def process_prop_event(
 
             alerts_sent += _alert_on_matched_lines(
                 db, telegram, event, sport_key, market_key, ontario_bms, lookup,
-                settings.min_ev_pct, bankroll, commence_time, hours_to_commence, now,
+                settings.min_ev_pct, bankroll, commence_time, now,
             )
 
     return alerts_sent
@@ -690,8 +677,8 @@ def _select_spread_alt_lookup(
     if pinnacle_ok:
         sharp_curve = _spread_alt_points_from_bm(pinnacle_bm, market_key, settings.devig_method)
         if sharp_curve:
-            if basket_curve is not None:
-                sharp_curve = merge_curve_anchors(sharp_curve, basket_curve)
+            # Interpolate only within Pinnacle's own ladder -- do not splice soft-book
+            # points in as anchors (that inverted favorite alt-spread true probs).
             return _curve_lookup(sharp_curve, "pinnacle")
 
     if basket_curve is None:
