@@ -50,8 +50,11 @@ LEAGUE_LABELS = {
 }
 
 
+_ORDINAL_SUFFIXES = {1: "st", 2: "nd", 3: "rd", 21: "st", 22: "nd", 23: "rd", 31: "st"}
+
+
 def local_time_str(commence_time: dt.datetime, timezone: str) -> str:
-    """Formats a game's start time in the given local timezone, e.g. "Sun 1:00pm ET" --
+    """Formats a game's start time in the given local timezone, e.g. "Sep 18th 8:00pm ET" --
     shared by Telegram scan alerts and /status so both show the same at-a-glance sense of
     when a bet will settle. `timezone` is an IANA zone name (config/settings.yaml
     `scheduling.timezone`, "America/Toronto"); the "ET" suffix is hardcoded since that's the
@@ -59,7 +62,8 @@ def local_time_str(commence_time: dt.datetime, timezone: str) -> str:
     local = commence_time.astimezone(ZoneInfo(timezone))
     hour12 = local.hour % 12 or 12
     ampm = "am" if local.hour < 12 else "pm"
-    return f"{local.strftime('%a')} {hour12}:{local.minute:02d}{ampm} ET"
+    suffix = _ORDINAL_SUFFIXES.get(local.day, "th")
+    return f"{local.strftime('%b')} {local.day}{suffix} {hour12}:{local.minute:02d}{ampm} ET"
 
 
 class AwareDateTime(TypeDecorator):
@@ -156,7 +160,7 @@ class Alert(Base):
         274.5") -- bare outcome_name for h2h, where there's no line to show. This is the
         one place every caller (Telegram alerts, /status, the daily report) renders an
         outcome, so nothing else needs to know about participant/point formatting."""
-        if self.market == "spreads" and self.point is not None:
+        if self.market in ("spreads", "alternate_spreads") and self.point is not None:
             base = f"{self.outcome_name} {self.point:+g}"
         elif self.point is not None:  # totals, and Over/Under player props
             base = f"{self.outcome_name} {self.point:g}"
