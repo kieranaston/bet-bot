@@ -239,3 +239,13 @@ Actions secrets in CI/prod). Nothing else in the codebase reads YAML or `os.envi
   player props, which `/scores` can never auto-grade — see above).
 - `homepage_urls` in `config/bookmakers.yaml` (final deep-link fallback) are best-effort guesses,
   not verified against each book's actual current domain.
+- **Quota baseline includes pre-bot usage**: `/quota` showed 18,100/20,000 (90.5%) used as of
+  2026-09-15, only ~4 days after this project's first commit (2026-09-11) — alarming at first
+  glance, but per the user (2026-09-15) roughly half of that (~10,000) was already used on the
+  API key *before* this bot started scanning, not burned by the bot itself. Don't treat the raw
+  `/quota` used/remaining split as "this bot's cost" without accounting for that pre-existing
+  baseline — there's no reset-date field in the API response to separate old usage from new
+  automatically, so this has to be tracked by memory/judgment, not recomputed from `/quota` alone.
+  Schedule cadence was retuned 2026-09-15 (see `scheduling:`/`props:` comments in
+  `config/settings.yaml`) targeting ~50% of the 20,000/month plan for the bot's *own* ongoing
+  usage, on top of that baseline.
