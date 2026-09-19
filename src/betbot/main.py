@@ -25,7 +25,7 @@ from betbot.matching import (
     select_reference,
     true_prob_at,
 )
-from betbot.odds_client import OddsApiClient, OddsApiError
+from betbot.odds_client import OddsApiClient, OddsApiError, OddsApiQuotaExceededError
 from betbot.performance import build_report_lines
 from betbot.scheduler import current_scan_window_key
 from betbot.storage import Alert, Database, local_time_str
@@ -303,6 +303,8 @@ def run_scan(db: Database, settings: Settings, telegram: TelegramClient,
         # skips an unnecessary round-trip/rate-limit hit for sports with nothing upcoming).
         try:
             upcoming = odds_client.get_events(sport_key, window_from, window_to)
+        except OddsApiQuotaExceededError:
+            raise  # let the quota gate in run() handle this, not the per-sport skip below
         except OddsApiError:
             logger.exception("Failed to fetch events for %s", sport_key)
             continue
@@ -319,6 +321,8 @@ def run_scan(db: Database, settings: Settings, telegram: TelegramClient,
                 commence_time_to=window_to,
                 include_links=True,
             )
+        except OddsApiQuotaExceededError:
+            raise  # let the quota gate in run() handle this, not the per-sport skip below
         except OddsApiError:
             logger.exception("Failed to fetch odds for %s", sport_key)
             continue
@@ -743,6 +747,8 @@ def run_props_scan(db: Database, settings: Settings, telegram: TelegramClient,
 
         try:
             upcoming = odds_client.get_events(sport_key, window_from, window_to)
+        except OddsApiQuotaExceededError:
+            raise  # let the quota gate in run() handle this, not the per-sport skip below
         except OddsApiError:
             logger.exception("Failed to fetch events for %s (props)", sport_key)
             continue
@@ -761,6 +767,8 @@ def run_props_scan(db: Database, settings: Settings, telegram: TelegramClient,
                     bookmakers=settings.props_bookmakers,
                     include_links=True,
                 )
+            except OddsApiQuotaExceededError:
+                raise  # let the quota gate in run() handle this, not the per-event skip below
             except OddsApiError:
                 logger.exception(
                     "Failed to fetch prop odds for %s event %s", sport_key, event_stub["id"]
@@ -771,6 +779,56 @@ def run_props_scan(db: Database, settings: Settings, telegram: TelegramClient,
                 game_alt_markets=game_alt_markets,
             )
     return total_alerts
+
+
+# kv_state keys used by the quota-exhaustion gate below. The Odds API's quota resets
+# monthly but no response exposes the reset date (see the "Quota baseline" note in
+# CLAUDE.md), so there's no way to compute a resume time up front -- instead we just stop
+# spending credits and periodically retry a free call until it reports headroom again.
+QUOTA_EXHAUSTED_KV_KEY = "quota_exhausted"
+QUOTA_EXHAUSTED_AT_KV_KEY = "quota_exhausted_at"
+
+
+def _mark_quota_exhausted(db: Database, telegram: TelegramClient) -> None:
+    """Called wherever a paid Odds API call raises OddsApiQuotaExceededError (see run(),
+    and commands._cmd_scan for the manual /scan path). Persists the paused state so every
+    future tick's quota gate (see run()) skips paid calls until _quota_available() confirms
+    credits are back, and sends a one-time Telegram alert on the transition into paused."""
+    already_exhausted = db.get_kv(QUOTA_EXHAUSTED_KV_KEY) == "true"
+    db.set_kv(QUOTA_EXHAUSTED_KV_KEY, "true")
+    if already_exhausted:
+        return
+    db.set_kv(QUOTA_EXHAUSTED_AT_KV_KEY, dt.datetime.now(dt.timezone.utc).isoformat())
+    telegram.send_message(
+        "\U0001F6AB *Odds API quota exhausted* for this billing period -- pausing all "
+        "scans (main markets, props, and auto-settlement) until it resets.\n"
+        "I'll keep checking for free in the background and resume automatically; "
+        "`/quota` still works any time to check manually."
+    )
+
+
+def _quota_available(db: Database, odds_client: OddsApiClient, telegram: TelegramClient) -> bool:
+    """Free recheck of whether credits are available again -- piggybacks on
+    OddsApiClient.get_quota()'s /sports call, which the docs confirm costs 0 regardless of
+    quota state, so polling this while paused never itself spends anything. Only meant to
+    be called when QUOTA_EXHAUSTED_KV_KEY is already set."""
+    try:
+        quota = odds_client.get_quota()
+    except OddsApiError:
+        logger.exception("Quota recheck failed -- staying paused.")
+        return False
+    remaining = quota.get("remaining")
+    try:
+        available = int(remaining) > 0
+    except (TypeError, ValueError):
+        available = False
+    if not available:
+        return False
+    db.set_kv(QUOTA_EXHAUSTED_KV_KEY, "false")
+    telegram.send_message(
+        f"✅ *Odds API quota available again* (remaining: {remaining}) -- resuming scans."
+    )
+    return True
 
 
 def run() -> None:
@@ -842,27 +900,44 @@ def run() -> None:
         logger.info("Outside scheduled scan windows -- skipping odds fetch.")
         return
 
+    # 3.5 Quota gate: a prior tick may have already hit OUT_OF_USAGE_CREDITS (see the
+    # try/except below) and paused scanning. Before spending anything this tick, do one
+    # free recheck; if credits are still exhausted, skip all paid calls below entirely
+    # rather than re-discovering the same OUT_OF_USAGE_CREDITS error on every sport.
+    if db.get_kv(QUOTA_EXHAUSTED_KV_KEY) == "true" and not _quota_available(db, odds_client, telegram):
+        logger.info("Odds API quota still exhausted -- skipping scan(s) this tick.")
+        return
+
     bankroll = db.current_bankroll(settings.starting_bankroll)
     total_alerts = 0
 
-    if should_scan_main:
-        # 4. Auto-settle any placed bets whose games have finished (cheap flat-rate
-        # /scores call, only for sports with something actually pending).
-        if settings.settlement_enabled:
-            settled = settlement.auto_settle_pending(db, settings, telegram, odds_client)
-            if settled:
-                logger.info("Auto-settled %d bet(s).", settled)
+    try:
+        if should_scan_main:
+            # 4. Auto-settle any placed bets whose games have finished (cheap flat-rate
+            # /scores call, only for sports with something actually pending).
+            if settings.settlement_enabled:
+                settled = settlement.auto_settle_pending(db, settings, telegram, odds_client)
+                if settled:
+                    logger.info("Auto-settled %d bet(s).", settled)
 
-        # 5. Scan configured sports/markets for +EV lines.
-        total_alerts += run_scan(db, settings, telegram, odds_client, bankroll, now)
-        if not force_run:
-            db.set_kv("last_scan_window", window_key)
+            # 5. Scan configured sports/markets for +EV lines.
+            total_alerts += run_scan(db, settings, telegram, odds_client, bankroll, now)
+            if not force_run:
+                db.set_kv("last_scan_window", window_key)
 
-    if should_scan_props:
-        # 6. Scan configured sports' player_markets for +EV props (consensus devig).
-        total_alerts += run_props_scan(db, settings, telegram, odds_client, bankroll, now)
-        if not force_run:
-            db.set_kv("last_props_scan_window", props_window_key)
+        if should_scan_props:
+            # 6. Scan configured sports' player_markets for +EV props (consensus devig).
+            total_alerts += run_props_scan(db, settings, telegram, odds_client, bankroll, now)
+            if not force_run:
+                db.set_kv("last_props_scan_window", props_window_key)
+    except OddsApiQuotaExceededError:
+        # Whatever step raised this didn't finish (and didn't mark its window consumed),
+        # so the next tick after quota recovers will retry it cleanly -- any alerts sent by
+        # an earlier step this same tick (e.g. main markets, before props hit the wall) are
+        # already persisted and unaffected.
+        _mark_quota_exhausted(db, telegram)
+        logger.warning("Odds API quota exhausted mid-scan -- pausing further scans until it resets.")
+        return
 
     logger.info("Scan complete: %d new/updated alert(s) sent.", total_alerts)
     if not total_alerts:

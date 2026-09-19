@@ -1,9 +1,11 @@
 import datetime as dt
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 from betbot import commands
+from betbot.odds_client import OddsApiQuotaExceededError
 from betbot.storage import Alert, Database, local_time_str
 
 
@@ -471,6 +473,20 @@ def test_scan_allowed_again_after_cooldown_elapses():
     reply = commands._dispatch(db, settings, telegram, odds_client, "/scan")
 
     assert reply.startswith("Manual scan complete")
+
+
+def test_scan_reports_quota_exhausted_and_pauses_instead_of_raw_error():
+    db = _db()
+    settings = _fake_settings(sports=[{"key": "icehockey_nhl", "markets": ["h2h"]}])
+    telegram = MagicMock()
+    odds_client = MagicMock()
+    odds_client.get_events.side_effect = OddsApiQuotaExceededError("out of credits")
+
+    reply = commands._dispatch(db, settings, telegram, odds_client, "/scan")
+
+    assert reply == "Odds API quota is exhausted -- automatic scans are paused until it resets."
+    assert db.get_kv("quota_exhausted") == "true"
+    telegram.send_message.assert_called_once()  # the pause notification, not a raw traceback
 
 
 def test_quota_reports_usage_and_percentage():

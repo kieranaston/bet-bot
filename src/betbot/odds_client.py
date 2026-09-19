@@ -44,6 +44,16 @@ class OddsApiError(RuntimeError):
     pass
 
 
+class OddsApiQuotaExceededError(OddsApiError):
+    """The Odds API's OUT_OF_USAGE_CREDITS error: the monthly usage-credit quota is fully
+    spent (api-docs/docs_markdown/liveapi_guides_v4_api-error-codes.html.md). A subclass of
+    OddsApiError so existing `except OddsApiError:` call sites still catch it if they don't
+    care, but callers that need to pause scanning specifically on this condition (see
+    betbot.main's quota gate) can catch it separately -- and must re-raise it past any
+    `except OddsApiError: continue`-style per-sport/per-event handler, since that would
+    otherwise silently swallow it and keep hammering the API for every remaining sport."""
+
+
 def _iso(t: dt.datetime) -> str:
     return t.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -85,8 +95,17 @@ class OddsApiClient:
                 time.sleep(wait)
                 continue
             if resp.status_code != 200:
+                body = resp.text[:500]
+                # Matched on the error_code in the body rather than a specific status code,
+                # since the docs don't pin OUT_OF_USAGE_CREDITS to one -- this is the exact
+                # string the docs say the API returns for it.
+                if "OUT_OF_USAGE_CREDITS" in body:
+                    raise OddsApiQuotaExceededError(
+                        f"Odds API usage credits exhausted for this billing period "
+                        f"(call: {log_label}): {body}"
+                    )
                 raise OddsApiError(
-                    f"The Odds API returned {resp.status_code} for {log_label}: {resp.text[:500]}"
+                    f"The Odds API returned {resp.status_code} for {log_label}: {body}"
                 )
             # Stashed so get_quota() can report the latest usage snapshot without assuming
             # any particular prior call happened this run.

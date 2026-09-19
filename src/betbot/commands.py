@@ -258,7 +258,13 @@ def _cmd_scan(
     db.set_kv("last_manual_scan_at", now.isoformat())
 
     bankroll = db.current_bankroll(settings.starting_bankroll)
-    alerts_sent = betbot_main.run_scan(db, settings, telegram, odds_client, bankroll, now)
+    try:
+        alerts_sent = betbot_main.run_scan(db, settings, telegram, odds_client, bankroll, now)
+    except betbot_main.OddsApiQuotaExceededError:
+        # Same pause-and-notify path a scheduled scan takes (betbot.main.run()) -- a manual
+        # /scan shouldn't bypass it or fail with a raw exception message.
+        betbot_main._mark_quota_exhausted(db, telegram)
+        return "Odds API quota is exhausted -- automatic scans are paused until it resets."
     if alerts_sent:
         return f"Manual scan complete: {alerts_sent} alert(s) sent above."
     return "Manual scan complete: no new +EV opportunities right now."

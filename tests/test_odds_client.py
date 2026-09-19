@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from betbot.odds_client import OddsApiClient, OddsApiError
+from betbot.odds_client import OddsApiClient, OddsApiError, OddsApiQuotaExceededError
 
 CLIENT = OddsApiClient(api_key="k", base_url="https://api.the-odds-api.com/v4")
 
@@ -48,6 +48,26 @@ def test_get_odds_uses_regions_param_for_discovery(mock_get):
 @patch("betbot.odds_client.requests.get")
 def test_get_odds_raises_on_error_status(mock_get):
     mock_get.return_value = _fake_response({"message": "bad key"}, status=401)
+    with pytest.raises(OddsApiError):
+        CLIENT.get_odds("icehockey_nhl", ["h2h"], bookmakers="pinnacle")
+
+
+@patch("betbot.odds_client.requests.get")
+def test_out_of_usage_credits_raises_quota_specific_subclass(mock_get):
+    mock_get.return_value = _fake_response(
+        {"message": "out of credits", "error_code": "OUT_OF_USAGE_CREDITS"}, status=401
+    )
+    with pytest.raises(OddsApiQuotaExceededError):
+        CLIENT.get_odds("icehockey_nhl", ["h2h"], bookmakers="pinnacle")
+
+
+@patch("betbot.odds_client.requests.get")
+def test_quota_exceeded_error_is_still_a_plain_odds_api_error(mock_get):
+    # Existing `except OddsApiError:` call sites that don't specifically care about quota
+    # exhaustion must still catch it -- it's a subclass, not a sibling.
+    mock_get.return_value = _fake_response(
+        {"message": "out of credits", "error_code": "OUT_OF_USAGE_CREDITS"}, status=401
+    )
     with pytest.raises(OddsApiError):
         CLIENT.get_odds("icehockey_nhl", ["h2h"], bookmakers="pinnacle")
 

@@ -1,14 +1,21 @@
 import datetime as dt
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from betbot.main import (
+    QUOTA_EXHAUSTED_KV_KEY,
     _devig_spread_alternates,
     _events_within_pregame_window,
+    _mark_quota_exhausted,
+    _quota_available,
     process_event,
     process_prop_event,
+    run_props_scan,
+    run_scan,
 )
+from betbot.odds_client import OddsApiQuotaExceededError
 from betbot.storage import Alert, Database
 
 
@@ -951,3 +958,97 @@ def test_process_event_no_send_when_line_no_longer_plus_ev_and_not_marked_skippe
     with db.session() as s:
         alert = s.query(Alert).one()
         assert alert.status == "notified"  # not skipped
+
+
+def _scan_settings(**overrides) -> SimpleNamespace:
+    defaults = dict(
+        sports=[{"key": "icehockey_nhl", "markets": ["h2h"]}],
+        max_hours_ahead=168,
+        scan_bookmakers="pinnacle,bet99_ca_on",
+        props_max_hours_ahead=48,
+        props_pregame_window_hours=4,
+        props_max_events_per_scan_per_sport=8,
+        props_bookmakers="pinnacle,bet99_ca_on",
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def test_run_scan_reraises_quota_exceeded_from_free_events_precheck():
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    odds_client = MagicMock()
+    odds_client.get_events.side_effect = OddsApiQuotaExceededError("out of credits")
+
+    with pytest.raises(OddsApiQuotaExceededError):
+        run_scan(db, _scan_settings(), telegram, odds_client, 1000.0, dt.datetime.now(dt.timezone.utc))
+    odds_client.get_odds.assert_not_called()
+
+
+def test_run_scan_reraises_quota_exceeded_from_paid_odds_call():
+    """A per-sport `except OddsApiError: continue` must not swallow this -- otherwise the
+    scan would silently skip every remaining sport instead of ever pausing (see the quota
+    gate in betbot.main.run())."""
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    odds_client = MagicMock()
+    odds_client.get_events.return_value = [{"id": "evt1"}]
+    odds_client.get_odds.side_effect = OddsApiQuotaExceededError("out of credits")
+
+    with pytest.raises(OddsApiQuotaExceededError):
+        run_scan(db, _scan_settings(), telegram, odds_client, 1000.0, dt.datetime.now(dt.timezone.utc))
+
+
+def test_run_props_scan_reraises_quota_exceeded_from_paid_event_odds_call():
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    odds_client = MagicMock()
+    now = dt.datetime.now(dt.timezone.utc)
+    odds_client.get_events.return_value = [
+        {"id": "evt1", "commence_time": (now + dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    ]
+    odds_client.get_event_odds.side_effect = OddsApiQuotaExceededError("out of credits")
+
+    settings = _scan_settings(
+        sports=[{"key": "baseball_mlb", "markets": ["h2h"], "player_markets": ["batter_hits"]}]
+    )
+    with pytest.raises(OddsApiQuotaExceededError):
+        run_props_scan(db, settings, telegram, odds_client, 1000.0, now)
+
+
+def test_mark_quota_exhausted_sends_one_time_alert_and_persists_flag():
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+
+    _mark_quota_exhausted(db, telegram)
+    assert db.get_kv(QUOTA_EXHAUSTED_KV_KEY) == "true"
+    assert telegram.send_message.call_count == 1
+
+    # A second call (e.g. quota exhausted again the same tick, or another tick before
+    # recovery) must not re-notify.
+    _mark_quota_exhausted(db, telegram)
+    assert telegram.send_message.call_count == 1
+
+
+def test_quota_available_clears_flag_and_notifies_when_remaining_positive():
+    db = Database("sqlite:///:memory:")
+    db.set_kv(QUOTA_EXHAUSTED_KV_KEY, "true")
+    telegram = MagicMock()
+    odds_client = MagicMock()
+    odds_client.get_quota.return_value = {"used": "19000", "remaining": "1000"}
+
+    assert _quota_available(db, odds_client, telegram) is True
+    assert db.get_kv(QUOTA_EXHAUSTED_KV_KEY) == "false"
+    telegram.send_message.assert_called_once()
+
+
+def test_quota_available_stays_false_and_silent_when_still_zero():
+    db = Database("sqlite:///:memory:")
+    db.set_kv(QUOTA_EXHAUSTED_KV_KEY, "true")
+    telegram = MagicMock()
+    odds_client = MagicMock()
+    odds_client.get_quota.return_value = {"used": "20000", "remaining": "0"}
+
+    assert _quota_available(db, odds_client, telegram) is False
+    assert db.get_kv(QUOTA_EXHAUSTED_KV_KEY) == "true"
+    telegram.send_message.assert_not_called()

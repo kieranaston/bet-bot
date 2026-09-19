@@ -12,7 +12,7 @@ import logging
 from sqlalchemy import or_
 
 from betbot.config import Settings
-from betbot.odds_client import OddsApiClient, OddsApiError
+from betbot.odds_client import OddsApiClient, OddsApiError, OddsApiQuotaExceededError
 from betbot.storage import Alert, Database, utcnow
 from betbot.telegram import TelegramClient
 
@@ -167,6 +167,8 @@ def auto_settle_pending(
         for sport_key, alerts in by_sport.items():
             try:
                 scores = odds_client.get_scores(sport_key, days_from=settings.settlement_days_from)
+            except OddsApiQuotaExceededError:
+                raise  # let the quota gate in betbot.main handle this, not the per-sport skip below
             except OddsApiError:
                 logger.exception("Failed to fetch scores for %s", sport_key)
                 continue

@@ -2,6 +2,9 @@ import datetime as dt
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
+from betbot.odds_client import OddsApiQuotaExceededError
 from betbot.settlement import auto_settle_pending, grade_alert
 from betbot.storage import Alert, Database
 
@@ -184,6 +187,28 @@ def test_auto_settle_queries_scores_for_started_games():
 
     assert settled == 0
     odds_client.get_scores.assert_called_once_with("icehockey_nhl", days_from=2)
+
+
+def test_auto_settle_reraises_quota_exceeded_instead_of_skipping_sport():
+    """OddsApiQuotaExceededError must propagate out (for betbot.main's quota gate to
+    catch) rather than being swallowed by the generic `except OddsApiError: continue`
+    used for ordinary per-sport failures -- otherwise settlement would silently no-op
+    forever instead of ever pausing."""
+    db = Database("sqlite:///:memory:")
+    with db.session() as s:
+        s.add(
+            _alert(
+                status="placed",
+                commence_time=dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=3),
+            )
+        )
+
+    odds_client = MagicMock()
+    odds_client.get_scores.side_effect = OddsApiQuotaExceededError("out of credits")
+    telegram = MagicMock()
+
+    with pytest.raises(OddsApiQuotaExceededError):
+        auto_settle_pending(db, _fake_settings(), telegram, odds_client)
 
 
 def test_auto_settle_grades_alternate_spreads():
