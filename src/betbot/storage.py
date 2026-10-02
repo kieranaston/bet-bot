@@ -139,7 +139,10 @@ class Alert(Base):
     recommended_stake = Column(Float, nullable=False)
     deep_link = Column(String, nullable=True)  # direct betslip/event link, if the book offers one
 
-    # Lifecycle: new -> notified -> placed|skipped -> settled_win|settled_loss|settled_push
+    # Lifecycle: pending_confirm -> notified -> placed|skipped -> settled_win|settled_loss|settled_push.
+    # pending_confirm is a line that cleared the EV floor once and is waiting on a second
+    # fetch (ev.confirm_delay_minutes) before anyone is pinged. confirm_delay_minutes of 0
+    # skips that status and goes straight to notified.
     status = Column(String, nullable=False, default="new")
     placed_stake = Column(Float, nullable=True)
     closing_odds = Column(Float, nullable=True)  # for CLV, filled in at /settle time
@@ -150,6 +153,10 @@ class Alert(Base):
     # betbot.settlement.auto_settle_pending.
     settlement_reminder_sent_at = Column(AwareDateTime, nullable=True)
 
+    # When this identity first cleared the EV floor on the sighting that started the
+    # current confirmation hold. Reset if the Ontario price changes before the hold
+    # elapses, so a moved number has to survive its own recheck. Not reset on a
+    # re-alert of an already-notified line.
     first_seen_at = Column(AwareDateTime, default=utcnow)
     last_alerted_at = Column(AwareDateTime, nullable=True)
     updated_at = Column(AwareDateTime, default=utcnow, onupdate=utcnow)

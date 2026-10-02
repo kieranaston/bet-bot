@@ -265,9 +265,9 @@ def _cmd_scan(
         # /scan shouldn't bypass it or fail with a raw exception message.
         betbot_main._mark_quota_exhausted(db, telegram)
         return "Odds API quota is exhausted -- automatic scans are paused until it resets."
-    if alerts_sent:
-        return f"Manual scan complete: {alerts_sent} alert(s) sent above."
-    return "Manual scan complete: no new +EV opportunities right now."
+    delay = float(getattr(settings, "confirm_delay_minutes", 0) or 0)
+    held = betbot_main.count_pending_since(db, now) if delay > 0 else 0
+    return betbot_main.scan_followup_message(alerts_sent, held, delay, manual=True)
 
 
 def _cmd_quota(odds_client: OddsApiClient) -> str:

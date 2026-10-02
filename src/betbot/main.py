@@ -210,10 +210,17 @@ def _upsert_and_maybe_notify(
     sharp_book_key: str,
     participant: str = "",
 ) -> int:
-    """Persist a still-+EV candidate and Telegram-notify. No cooldown: every scan that
-    re-confirms +EV against the current sharp reference re-pings, unless the user already
-    /placed, /skip'd, or settled this alert identity. Lines that fall below the EV floor
-    never reach this function, so they go quiet without being marked skipped."""
+    """Persist a still-+EV candidate and maybe Telegram-notify.
+
+    The first time an identity clears the EV floor it is stored as pending_confirm and
+    not sent. confirm_pending re-fetches it after ev.confirm_delay_minutes and only then
+    pings, if it's still +EV — a price that existed for one scrape and vanished doesn't
+    reach you. confirm_delay_minutes of 0 sends on this first sighting.
+
+    A line already notified (and not /placed, /skip'd, or settled) re-pings on every
+    later scan that still finds it +EV. Lines that fall below the EV floor never reach
+    this function, so they go quiet without being marked skipped."""
+    delay = settings.confirm_delay_minutes
     with db.session() as s:
         existing = (
             s.query(Alert)
@@ -246,14 +253,38 @@ def _upsert_and_maybe_notify(
                 true_prob=true_prob,
                 ev_pct=ev,
                 recommended_stake=stake,
-                status="new",
+                status="pending_confirm" if delay > 0 else "new",
+                first_seen_at=now,
             )
             s.add(alert)
+            s.flush()  # ensure alert.id is populated for the hold log
+            if delay > 0:
+                logger.info(
+                    "Holding alert %s for a %.0f min recheck: %s %s @ %s",
+                    alert.id, delay, market_key, outcome_name, bookmaker_key,
+                )
+                return 0
         else:
             if existing.status in (
                 "placed", "skipped", "settled_win", "settled_loss", "settled_push",
             ):
                 return 0  # user already acted on this -- don't re-alert
+            if existing.status == "pending_confirm" and delay > 0:
+                seen = existing.first_seen_at or now
+                age_minutes = (now - seen).total_seconds() / 60.0
+                # A different Ontario number has to survive its own wait. Once the
+                # wait is already over, this snapshot is the recheck — alert it as-is.
+                if abs(existing.book_odds - price) > 1e-6 and age_minutes < delay:
+                    existing.first_seen_at = now
+                    age_minutes = 0.0
+                if age_minutes < delay:
+                    existing.book_odds = price
+                    existing.deep_link = deep_link
+                    existing.true_prob = true_prob
+                    existing.ev_pct = ev
+                    existing.recommended_stake = stake
+                    existing.sharp_book_key = sharp_book_key
+                    return 0
             existing.book_odds = price
             existing.deep_link = deep_link
             existing.true_prob = true_prob
@@ -831,6 +862,205 @@ def _quota_available(db: Database, odds_client: OddsApiClient, telegram: Telegra
     return True
 
 
+# Featured markets live on the bulk /odds endpoint. Everything else (player props,
+# alternate lines) is an additional market and has to be re-fetched per event.
+_MAIN_MARKETS = frozenset({"h2h", "spreads", "totals"})
+_GAME_ALT_MARKETS = frozenset({
+    "alternate_spreads", "alternate_totals", "team_totals", "alternate_team_totals",
+})
+_CONFIRM_BACKOFF_KEY = "confirm_retry_after"
+_CONFIRM_BACKOFF_MINUTES = 2
+
+
+def scan_followup_message(
+    sent: int, held: int, delay_minutes: float, *, manual: bool = False
+) -> str | None:
+    """What to tell the user after a scan, besides the alerts themselves.
+
+    A scheduled scan that already sent alerts stays quiet (the alerts are the message)
+    unless it also held new lines for a recheck. A manual /scan always gets a reply.
+    """
+    prefix = "Manual scan complete" if manual else "Scan complete"
+    if held and delay_minutes > 0:
+        noun = "line" if held == 1 else "lines"
+        hold = (
+            f"{held} {noun} look +EV. "
+            f"Rechecking in {delay_minutes:g} min before alerting, "
+            f"so a price that vanishes immediately won't ping you."
+        )
+        if sent:
+            return f"{prefix}: {sent} alert(s) sent above. {hold}"
+        return f"{prefix}: {hold}"
+    if sent:
+        return f"{prefix}: {sent} alert(s) sent above." if manual else None
+    return f"{prefix}: no new +EV opportunities right now."
+
+
+def count_pending_since(db: Database, since: dt.datetime) -> int:
+    """How many lines this scan held for a recheck (first seen at or after `since`).
+
+    Compared in Python, not SQL: SQLite drops timezone info, and a SQL >= against an
+    aware datetime doesn't round-trip (see storage.AwareDateTime)."""
+    with db.session() as s:
+        rows = s.query(Alert).filter(Alert.status == "pending_confirm").all()
+        return sum(
+            1 for row in rows
+            if row.first_seen_at is not None and row.first_seen_at >= since
+        )
+
+
+def _expire_old_pending(db: Database, now: dt.datetime) -> None:
+    max_age = dt.timedelta(minutes=settings.confirm_max_age_minutes)
+    with db.session() as s:
+        rows = s.query(Alert).filter(Alert.status == "pending_confirm").all()
+        for row in rows:
+            seen = row.first_seen_at
+            if seen is None or now - seen > max_age:
+                logger.info(
+                    "Expiring unconfirmed alert %s — held longer than %.0f min.",
+                    row.id, settings.confirm_max_age_minutes,
+                )
+                s.delete(row)
+
+
+def _drop_unconfirmed(db: Database, alert_ids: list[int]) -> None:
+    """Remove holds whose recheck no longer finds them +EV. Deleting (rather than marking
+    them skipped) lets a later scan start a fresh hold if the price comes back."""
+    if not alert_ids:
+        return
+    with db.session() as s:
+        rows = (
+            s.query(Alert)
+            .filter(Alert.id.in_(alert_ids), Alert.status == "pending_confirm")
+            .all()
+        )
+        for row in rows:
+            logger.info(
+                "Dropping unconfirmed alert %s %s %s — not +EV on recheck.",
+                row.id, row.market, row.outcome_name,
+            )
+            s.delete(row)
+
+
+def _due_pending(db: Database, now: dt.datetime) -> list[tuple[int, str, str, str]]:
+    """(id, sport_key, event_id, market) for holds old enough to recheck."""
+    delay = dt.timedelta(minutes=settings.confirm_delay_minutes)
+    with db.session() as s:
+        rows = s.query(Alert).filter(Alert.status == "pending_confirm").all()
+        due = []
+        for row in rows:
+            if row.first_seen_at is None:
+                continue
+            if now - row.first_seen_at >= delay:
+                due.append((row.id, row.sport_key, row.event_id, row.market))
+        return due
+
+
+def confirm_pending(
+    db: Database,
+    telegram: TelegramClient,
+    odds_client: OddsApiClient,
+    now: dt.datetime,
+) -> int:
+    """Re-fetch held lines whose wait has elapsed and alert only the ones still +EV.
+
+    Runs on every poll tick, not only inside a scan window, so the wait is a few minutes
+    rather than until the next scheduled scan. Costs credits only for sports/events that
+    actually have a hold due. An API error backs off briefly and leaves the holds in
+    place to retry; it does not alert off the original snapshot.
+    """
+    if settings.confirm_delay_minutes <= 0:
+        return 0
+    _expire_old_pending(db, now)
+    due = _due_pending(db, now)
+    if not due:
+        return 0
+    retry_raw = db.get_kv(_CONFIRM_BACKOFF_KEY)
+    if retry_raw:
+        retry_at = dt.datetime.fromisoformat(retry_raw)
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=dt.timezone.utc)
+        if now < retry_at:
+            logger.info("Confirmation recheck on backoff until %s.", retry_at.isoformat())
+            return 0
+
+    bankroll = db.current_bankroll(settings.starting_bankroll)
+    main_by_sport: dict[str, list[tuple[str, list[tuple[int, str, str, str]]]]] = defaultdict(list)
+    extra_by_event: dict[tuple[str, str], list[tuple[int, str, str, str]]] = defaultdict(list)
+    for item in due:
+        _id, sport_key, event_id, market = item
+        if market in _MAIN_MARKETS:
+            groups = main_by_sport.setdefault(sport_key, [])
+            bucket = next((g for g in groups if g[0] == event_id), None)
+            if bucket is None:
+                groups.append((event_id, [item]))
+            else:
+                bucket[1].append(item)
+        else:
+            extra_by_event[(sport_key, event_id)].append(item)
+
+    sent = 0
+    failed = False
+    window_to = now + dt.timedelta(hours=settings.max_hours_ahead)
+    for sport_key, event_groups in main_by_sport.items():
+        markets = sorted({item[3] for _, items in event_groups for item in items})
+        try:
+            events = odds_client.get_odds(
+                sport_key,
+                markets,
+                bookmakers=settings.scan_bookmakers,
+                commence_time_from=now,
+                commence_time_to=window_to,
+                include_links=True,
+            )
+        except OddsApiQuotaExceededError:
+            raise
+        except OddsApiError:
+            logger.exception("Confirm re-fetch failed for %s", sport_key)
+            failed = True
+            continue
+        by_id = {event["id"]: event for event in events}
+        for event_id, items in event_groups:
+            event = by_id.get(event_id)
+            if event is not None:
+                sent += process_event(
+                    db, telegram, event, sport_key, markets, bankroll, now
+                )
+            _drop_unconfirmed(db, [item[0] for item in items])
+
+    for (sport_key, event_id), items in extra_by_event.items():
+        markets = sorted({item[3] for item in items})
+        player_markets = [m for m in markets if m not in _GAME_ALT_MARKETS]
+        game_alt_markets = [m for m in markets if m in _GAME_ALT_MARKETS]
+        try:
+            event = odds_client.get_event_odds(
+                sport_key,
+                event_id,
+                markets,
+                bookmakers=settings.props_bookmakers,
+                include_links=True,
+            )
+        except OddsApiQuotaExceededError:
+            raise
+        except OddsApiError:
+            logger.exception(
+                "Confirm re-fetch failed for %s event %s", sport_key, event_id
+            )
+            failed = True
+            continue
+        sent += process_prop_event(
+            db, telegram, event, sport_key, player_markets, bankroll, now,
+            game_alt_markets=game_alt_markets,
+        )
+        _drop_unconfirmed(db, [item[0] for item in items])
+
+    if failed:
+        retry_at = now + dt.timedelta(minutes=_CONFIRM_BACKOFF_MINUTES)
+        db.set_kv(_CONFIRM_BACKOFF_KEY, retry_at.isoformat())
+        logger.info("Confirmation recheck backing off until %s.", retry_at.isoformat())
+    return sent
+
+
 def run() -> None:
     secrets = Secrets.from_env()
     db = Database(secrets.database_url)
@@ -896,22 +1126,30 @@ def run() -> None:
         props_window_key is not None
         and db.get_kv("last_props_scan_window") != props_window_key
     )
-    if not should_scan_main and not should_scan_props:
-        logger.info("Outside scheduled scan windows -- skipping odds fetch.")
-        return
-
     # 3.5 Quota gate: a prior tick may have already hit OUT_OF_USAGE_CREDITS (see the
     # try/except below) and paused scanning. Before spending anything this tick, do one
     # free recheck; if credits are still exhausted, skip all paid calls below entirely
     # rather than re-discovering the same OUT_OF_USAGE_CREDITS error on every sport.
+    # This includes the +EV recheck, which is a paid fetch when a hold is due.
     if db.get_kv(QUOTA_EXHAUSTED_KV_KEY) == "true" and not _quota_available(db, odds_client, telegram):
         logger.info("Odds API quota still exhausted -- skipping scan(s) this tick.")
         return
 
-    bankroll = db.current_bankroll(settings.starting_bankroll)
-    total_alerts = 0
+    scan_sent = 0
 
     try:
+        # Held lines recheck on every tick, including between scan windows, so the wait is
+        # a few minutes rather than until the next scheduled scan. No-op (no API call) when
+        # nothing is due.
+        confirmed = confirm_pending(db, telegram, odds_client, now)
+        if confirmed:
+            logger.info("Confirmed %d held alert(s).", confirmed)
+
+        if not should_scan_main and not should_scan_props:
+            logger.info("Outside scheduled scan windows -- skipping odds fetch.")
+            return
+
+        bankroll = db.current_bankroll(settings.starting_bankroll)
         if should_scan_main:
             # 4. Auto-settle any placed bets whose games have finished (cheap flat-rate
             # /scores call, only for sports with something actually pending).
@@ -921,13 +1159,13 @@ def run() -> None:
                     logger.info("Auto-settled %d bet(s).", settled)
 
             # 5. Scan configured sports/markets for +EV lines.
-            total_alerts += run_scan(db, settings, telegram, odds_client, bankroll, now)
+            scan_sent += run_scan(db, settings, telegram, odds_client, bankroll, now)
             if not force_run:
                 db.set_kv("last_scan_window", window_key)
 
         if should_scan_props:
             # 6. Scan configured sports' player_markets for +EV props (consensus devig).
-            total_alerts += run_props_scan(db, settings, telegram, odds_client, bankroll, now)
+            scan_sent += run_props_scan(db, settings, telegram, odds_client, bankroll, now)
             if not force_run:
                 db.set_kv("last_props_scan_window", props_window_key)
     except OddsApiQuotaExceededError:
@@ -939,9 +1177,11 @@ def run() -> None:
         logger.warning("Odds API quota exhausted mid-scan -- pausing further scans until it resets.")
         return
 
-    logger.info("Scan complete: %d new/updated alert(s) sent.", total_alerts)
-    if not total_alerts:
-        telegram.send_message("Scan complete: no new +EV opportunities right now.")
+    held = count_pending_since(db, now) if settings.confirm_delay_minutes > 0 else 0
+    logger.info("Scan complete: %d alert(s) sent, %d held for recheck.", scan_sent, held)
+    followup = scan_followup_message(scan_sent, held, settings.confirm_delay_minutes)
+    if followup:
+        telegram.send_message(followup)
 
 
 if __name__ == "__main__":

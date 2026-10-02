@@ -4,19 +4,42 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from betbot.config import settings
 from betbot.main import (
     QUOTA_EXHAUSTED_KV_KEY,
     _devig_spread_alternates,
     _events_within_pregame_window,
     _mark_quota_exhausted,
     _quota_available,
+    confirm_pending,
     process_event,
     process_prop_event,
     run_props_scan,
     run_scan,
+    scan_followup_message,
 )
-from betbot.odds_client import OddsApiQuotaExceededError
+from betbot.odds_client import OddsApiError, OddsApiQuotaExceededError
 from betbot.storage import Alert, Database
+
+
+@pytest.fixture(autouse=True)
+def _alert_on_first_snapshot():
+    """Existing detection tests expect a Telegram on the first +EV snapshot.
+    Confirmation hold is covered by its own tests, which set the delay themselves."""
+    ev = settings._raw["ev"]
+    previous_delay = ev.get("confirm_delay_minutes")
+    previous_max_age = ev.get("confirm_max_age_minutes")
+    ev["confirm_delay_minutes"] = 0
+    ev["confirm_max_age_minutes"] = 20
+    yield
+    if previous_delay is None:
+        ev.pop("confirm_delay_minutes", None)
+    else:
+        ev["confirm_delay_minutes"] = previous_delay
+    if previous_max_age is None:
+        ev.pop("confirm_max_age_minutes", None)
+    else:
+        ev["confirm_max_age_minutes"] = previous_max_age
 
 
 def _stale_iso(now: dt.datetime, hours: float) -> str:
@@ -1052,3 +1075,201 @@ def test_quota_available_stays_false_and_silent_when_still_zero():
     assert _quota_available(db, odds_client, telegram) is False
     assert db.get_kv(QUOTA_EXHAUSTED_KV_KEY) == "true"
     telegram.send_message.assert_not_called()
+
+
+def _hold_delay(minutes: float = 3) -> None:
+    settings._raw["ev"]["confirm_delay_minutes"] = minutes
+
+
+def _plus_ev_h2h(price: float = 2.20) -> dict:
+    sharp = _bookmaker(
+        "pinnacle", [{"name": "Home Team", "price": 1.91}, {"name": "Away Team", "price": 1.91}]
+    )
+    book = _bookmaker(
+        "bet99_ca_on", [{"name": "Home Team", "price": price}, {"name": "Away Team", "price": 1.75}]
+    )
+    return _event([sharp, book])
+
+
+def test_first_plus_ev_snapshot_is_held_not_sent():
+    _hold_delay(3)
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    now = dt.datetime.now(dt.timezone.utc)
+
+    assert process_event(db, telegram, _plus_ev_h2h(), "americanfootball_nfl", ["h2h"], 1000.0, now) == 0
+    telegram.send_message.assert_not_called()
+    with db.session() as s:
+        alert = s.query(Alert).one()
+        assert alert.status == "pending_confirm"
+        assert alert.first_seen_at == now
+        assert alert.book_odds == 2.20
+
+
+def test_confirm_before_delay_does_not_refetch():
+    _hold_delay(3)
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    now = dt.datetime.now(dt.timezone.utc)
+    process_event(db, telegram, _plus_ev_h2h(), "americanfootball_nfl", ["h2h"], 1000.0, now)
+
+    odds = MagicMock()
+    assert confirm_pending(db, telegram, odds, now + dt.timedelta(minutes=1)) == 0
+    odds.get_odds.assert_not_called()
+    telegram.send_message.assert_not_called()
+
+
+def test_confirm_sends_when_recheck_still_plus_ev():
+    _hold_delay(3)
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    now = dt.datetime.now(dt.timezone.utc)
+    event = _plus_ev_h2h()
+    process_event(db, telegram, event, "americanfootball_nfl", ["h2h"], 1000.0, now)
+
+    odds = MagicMock()
+    odds.get_odds.return_value = [event]
+    sent = confirm_pending(db, telegram, odds, now + dt.timedelta(minutes=3))
+
+    assert sent == 1
+    telegram.send_message.assert_called_once()
+    odds.get_odds.assert_called_once()
+    assert odds.get_odds.call_args.args[1] == ["h2h"]
+    with db.session() as s:
+        alert = s.query(Alert).one()
+        assert alert.status == "notified"
+
+
+def test_confirm_drops_line_that_moved_off_plus_ev():
+    _hold_delay(3)
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    now = dt.datetime.now(dt.timezone.utc)
+    process_event(db, telegram, _plus_ev_h2h(), "americanfootball_nfl", ["h2h"], 1000.0, now)
+
+    moved = _plus_ev_h2h(price=1.85)
+    odds = MagicMock()
+    odds.get_odds.return_value = [moved]
+    assert confirm_pending(db, telegram, odds, now + dt.timedelta(minutes=3)) == 0
+    telegram.send_message.assert_not_called()
+    with db.session() as s:
+        assert s.query(Alert).count() == 0
+
+
+def test_price_change_during_hold_restarts_the_wait():
+    _hold_delay(3)
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    now = dt.datetime.now(dt.timezone.utc)
+    process_event(db, telegram, _plus_ev_h2h(2.20), "americanfootball_nfl", ["h2h"], 1000.0, now)
+    moved = _plus_ev_h2h(2.40)
+    process_event(
+        db, telegram, moved, "americanfootball_nfl", ["h2h"], 1000.0, now + dt.timedelta(minutes=1)
+    )
+
+    odds = MagicMock()
+    odds.get_odds.return_value = [moved]
+    # Original 3-minute mark is only 2 minutes after the new price.
+    assert confirm_pending(db, telegram, odds, now + dt.timedelta(minutes=3)) == 0
+    odds.get_odds.assert_not_called()
+
+    assert confirm_pending(db, telegram, odds, now + dt.timedelta(minutes=4)) == 1
+    telegram.send_message.assert_called_once()
+
+
+def test_confirm_api_error_keeps_the_hold_and_backs_off():
+    _hold_delay(3)
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    now = dt.datetime.now(dt.timezone.utc)
+    process_event(db, telegram, _plus_ev_h2h(), "americanfootball_nfl", ["h2h"], 1000.0, now)
+
+    odds = MagicMock()
+    odds.get_odds.side_effect = OddsApiError("down")
+    due = now + dt.timedelta(minutes=3)
+    assert confirm_pending(db, telegram, odds, due) == 0
+    telegram.send_message.assert_not_called()
+    with db.session() as s:
+        assert s.query(Alert).one().status == "pending_confirm"
+
+    odds.get_odds.reset_mock()
+    assert confirm_pending(db, telegram, odds, due + dt.timedelta(seconds=30)) == 0
+    odds.get_odds.assert_not_called()
+
+
+def test_confirm_expires_a_hold_that_sat_too_long():
+    _hold_delay(3)
+    settings._raw["ev"]["confirm_max_age_minutes"] = 20
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    now = dt.datetime.now(dt.timezone.utc)
+    process_event(db, telegram, _plus_ev_h2h(), "americanfootball_nfl", ["h2h"], 1000.0, now)
+
+    odds = MagicMock()
+    assert confirm_pending(db, telegram, odds, now + dt.timedelta(minutes=21)) == 0
+    odds.get_odds.assert_not_called()
+    with db.session() as s:
+        assert s.query(Alert).count() == 0
+
+
+def test_already_notified_line_realerts_without_another_hold():
+    _hold_delay(3)
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    now = dt.datetime.now(dt.timezone.utc)
+    event = _plus_ev_h2h()
+    process_event(db, telegram, event, "americanfootball_nfl", ["h2h"], 1000.0, now)
+    with db.session() as s:
+        alert = s.query(Alert).one()
+        alert.status = "notified"
+        alert.last_alerted_at = now
+
+    assert process_event(
+        db, telegram, event, "americanfootball_nfl", ["h2h"], 1000.0, now + dt.timedelta(hours=2)
+    ) == 1
+    telegram.send_message.assert_called_once()
+
+
+def test_confirm_prop_uses_per_event_fetch():
+    _hold_delay(3)
+    db = Database("sqlite:///:memory:")
+    telegram = MagicMock()
+    now = dt.datetime.now(dt.timezone.utc)
+    market_key = "player_points"
+    fanduel = _prop_bookmaker(
+        "fanduel", market_key,
+        [
+            {"name": "Over", "point": 24.5, "price": 1.91, "description": "Player A"},
+            {"name": "Under", "point": 24.5, "price": 1.91, "description": "Player A"},
+        ],
+    )
+    draftkings = _prop_bookmaker(
+        "draftkings", market_key,
+        [
+            {"name": "Over", "point": 24.5, "price": 1.91, "description": "Player A"},
+            {"name": "Under", "point": 24.5, "price": 1.91, "description": "Player A"},
+        ],
+    )
+    ontario = _prop_bookmaker(
+        "bet99_ca_on", market_key,
+        [{"name": "Over", "point": 24.5, "price": 2.20, "description": "Player A"}],
+    )
+    event = _event([fanduel, draftkings, ontario])
+    assert process_prop_event(
+        db, telegram, event, "basketball_nba", [market_key], 1000.0, now
+    ) == 0
+
+    odds = MagicMock()
+    odds.get_event_odds.return_value = event
+    assert confirm_pending(db, telegram, odds, now + dt.timedelta(minutes=3)) == 1
+    odds.get_odds.assert_not_called()
+    odds.get_event_odds.assert_called_once()
+    assert odds.get_event_odds.call_args.args[2] == [market_key]
+    telegram.send_message.assert_called_once()
+
+
+def test_scan_followup_mentions_a_hold_instead_of_no_opportunities():
+    assert scan_followup_message(0, 2, 3).startswith("Scan complete: 2 lines look +EV")
+    assert scan_followup_message(0, 0, 3) == "Scan complete: no new +EV opportunities right now."
+    assert scan_followup_message(1, 0, 3) is None
+    assert "1 alert" in scan_followup_message(1, 0, 3, manual=True)
