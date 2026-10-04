@@ -22,7 +22,6 @@ pytest tests/test_devig.py  # run a single test file
 pytest -q -k ev_pct         # run tests matching a name
 
 python -m betbot.main       # run one scan (respects scan-time gating, see below)
-python scripts/report.py    # send a daily-digest-style message on demand
 python scripts/list_bookmakers.py americanfootball_nfl  # discover live bookmaker keys for a sport
 python scripts/list_event_markets.py basketball_nba     # discover live player-prop coverage
 python scripts/init_db.py   # create tables / seed bankroll
@@ -170,6 +169,12 @@ Key invariants to preserve when touching this path:
   immediately if price moves more than `PRICE_CHANGE_EPSILON`. A DB created before the
   2026-09-13 props rollout needs `scripts/migrate_add_participant.py` run once (`Base.metadata.
   create_all` never alters an existing table).
+- **Opposite-side caution, not suppression**: if an open `/placed` bet sits on the other
+  side of the exact line being alerted (same event, same participant, same market family
+  — `totals`≡`alternate_totals`, `spreads`≡`alternate_spreads` paired by point negation,
+  `team_totals`≡`alternate_team_totals` — any book), the alert still sends but carries a
+  "⚠️ You already hold the other side" line (`main.py::_opposite_placed_bets`). A different
+  line (e.g. Over 8.5 placed, Under 9.0 alerted — a middle) is deliberately not flagged.
 - **Auto-settlement grades every market `/scores`' two final team scores can resolve**:
   `settlement.py::GRADABLE_MARKETS` is `h2h, spreads, totals` plus the four
   `game_alt_markets` keys (`alternate_spreads`, `alternate_totals`, `team_totals`,

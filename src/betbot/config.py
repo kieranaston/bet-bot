@@ -97,17 +97,6 @@ class Settings:
         return float(self._raw["ev"]["sharp_max_staleness_minutes"])
 
     @property
-    def confirm_delay_minutes(self) -> float:
-        """Minutes between the first +EV sighting and the re-fetch that is allowed to
-        Telegram. 0 alerts on the first snapshot. See config/settings.yaml."""
-        return float(self._raw["ev"].get("confirm_delay_minutes", 0))
-
-    @property
-    def confirm_max_age_minutes(self) -> float:
-        """Drop a held line with no alert if it is still unconfirmed after this long."""
-        return float(self._raw["ev"].get("confirm_max_age_minutes", 20))
-
-    @property
     def sports(self) -> list[dict[str, Any]]:
         return self._raw["sports"]
 
@@ -166,10 +155,6 @@ class Settings:
     @property
     def props_max_events_per_scan_per_sport(self) -> int:
         return int(self._raw["props"]["max_events_per_scan_per_sport"])
-
-    @property
-    def daily_report_time_local(self) -> str:
-        return str(self._raw["reporting"]["time_local"])
 
     @property
     def settlement_enabled(self) -> bool:

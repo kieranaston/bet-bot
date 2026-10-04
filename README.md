@@ -26,8 +26,8 @@ code as a manual-dispatch-only emergency backup (see below), but isn't a real su
 4. Placed bets are auto-settled from `/scores` when the game finishes (moneyline/spread/total/
    team-total markets); player props have no player-level box score in that feed, so those
    need a manual `/settle`.
-5. A daily digest (bankroll, open bets, record, ROI) sends automatically at
-   `reporting.time_local`, or on demand via `scripts/report.py`.
+5. Telegram only hears from the bot when something matters: new +EV lines, settlements,
+   and quota problems. `/stats` gives bankroll, record, and ROI on demand.
 
 See `CLAUDE.md` for the full architecture, cost model, and the reasoning behind specific
 config choices (schedule cadence, market allowlists, devig method, etc).
@@ -103,21 +103,20 @@ pip install -e ".[dev]"
 cp .env.example .env        # fill in keys; DATABASE_URL can be left blank for local SQLite
 pytest -q                   # run tests
 python -m betbot.main       # run one iteration (poll + scan if in a window)
-python scripts/report.py    # send a daily-digest message on demand
 ```
 
 ## Backup: running via GitHub Actions
 
 Not currently set up or planned — the VPS is the only real deployment, using local SQLite.
-`.github/workflows/betbot-scan.yml` and `daily_report.yml` exist as manual-dispatch-only
-fallbacks (GitHub's native `schedule:` trigger proved unreliable for this at short cadences).
+`.github/workflows/betbot-scan.yml` exists as a manual-dispatch-only
+fallback (GitHub's native `schedule:` trigger proved unreliable for this at short cadences).
 Reviving this path would need a fresh persistent database (Actions runners have no durable
 disk) — see `CLAUDE.md` for the full history if you want to go there.
 
 ## Project layout
 
 ```
-config/settings.yaml      bankroll, Kelly, EV thresholds, sports/markets, schedule, report time
+config/settings.yaml      bankroll, Kelly, EV thresholds, sports/markets, schedule
 config/bookmakers.yaml    sharp/consensus/Ontario bookmaker keys
 src/betbot/
   odds_client.py          The Odds API wrapper
@@ -131,12 +130,11 @@ src/betbot/
   telegram.py             Telegram Bot API client
   commands.py             /placed, /skip, /settle, /bankroll, /status, /stats, /scan, /quota
   performance.py          ROI / win-rate rollups
-  main.py                 entry point: poll, gate, scan, settle, report
+  main.py                 entry point: poll, gate, scan, settle
 scripts/
   list_bookmakers.py      discovery helper (main markets)
   list_event_markets.py   discovery helper (props/game-alt markets, ground truth)
   init_db.py              creates tables / seeds bankroll
-  report.py               manual on-demand daily-digest sender
   migrate_*.py            one-time DB migrations
 .github/workflows/        disabled-by-default backups + pytest CI
 Dockerfile                how the VPS runs the bot

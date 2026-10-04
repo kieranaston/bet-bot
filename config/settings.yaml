@@ -43,18 +43,6 @@ ev:
   # real multi-hour gap like 2026-09-14's within one scan. Re-tune against real `/status`/
   # alert `sharp_book_key` observations once this has run for a while.
   sharp_max_staleness_minutes: 20
-  # Don't Telegram a line the instant it first clears the EV floor. Hold it, then re-fetch
-  # once this many minutes later and only alert if that second snapshot is still +EV.
-  # A single Odds API scrape often catches a price the book has already pulled, or one
-  # that was only up while the line was moving; those are gone by the time you can bet
-  # them. The recheck is not a full extra scan: only sports (main markets, one bulk
-  # /odds call) or events (props/alternates, one per-event call for just the held
-  # markets) that actually produced a hold. 0 alerts on the first snapshot.
-  confirm_delay_minutes: 3
-  # Drop a held line without alerting if it still hasn't been confirmed after this long
-  # (process was down, or the re-fetch kept failing). The next real scan can pick it up
-  # again and start a new hold.
-  confirm_max_age_minutes: 20
 
 sports:
   # The Odds API sport keys. Main markets only for v1 (moneyline / spread / totals).
@@ -253,13 +241,6 @@ props:
   # americanfootball_nfl: 3 markets) are combined into the SAME per-event odds call as
   # `player_markets:` for a given event -- cost is per unique market returned, not per
   # category, so this doesn't double the number of API calls.
-
-reporting:
-  # Daily digest send time, checked the same DST-aware way as scheduling.scan_times_local
-  # (see betbot.scheduler.is_scan_time) so it doesn't drift an hour across DST changes the
-  # way a fixed UTC cron would. .github/workflows/daily_report.yml ticks every 10 minutes
-  # for free and only actually sends when local Eastern time falls in this window.
-  time_local: "09:00"
 
 settlement:
   # Auto-settle placed bets using The Odds API's /scores endpoint (flat 2 credits/request
